@@ -1,0 +1,173 @@
+(ns eacl.explorer.explorer-test
+  (:require [cljs.test :refer-macros [deftest is]]
+            [clojure.set :as set]
+            [datascript.core :as d]
+            [eacl.core :as eacl]
+            [eacl.explorer.explorer :as explorer]
+            [eacl.explorer.seed :as seed]
+            [eacl.explorer.support :as support]))
+
+(defn- app-state
+  [ui]
+  {:ui     (merge explorer/default-ui-state ui)
+   :counts explorer/default-count-state
+   :db-rev 0})
+
+(deftest known-user-directory-pages-from-live-eacl-data
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [db                 (d/db conn)
+            page-1             (explorer/paged-known-users db nil client (app-state {:user-page 0}))
+            page-2             (explorer/paged-known-users db nil client (app-state {:user-page 1}))
+            page-3             (explorer/paged-known-users db nil client (app-state {:user-page 2}))
+            expected-page-2    (min explorer/user-page-size
+                                 (max 0 (- (:total page-1) explorer/user-page-size)))
+            expected-page-3    (min explorer/user-page-size
+                                 (max 0 (- (:total page-1) (* 2 explorer/user-page-size))))]
+        (is (= 20 (count (:items page-1))))
+        (is (= expected-page-2 (count (:items page-2))))
+        (is (= expected-page-3 (count (:items page-3))))
+        (is (number? (:total page-1)))
+        (is (= 1 (:page-start page-1)))
+        (is (= 21 (:page-start page-2)))
+        (is (= 41 (:page-start page-3)))
+        (is (:has-next? page-1))
+        (is (:has-next? page-2))
+        (is (not (:has-next? page-3)))
+        (is (string? (explorer/human-duration (:time page-1))))
+        (is (not= (:items page-1) (:items page-2)))))))
+
+(deftest resource-columns-render-against-foundation-only-runtime
+  (let [{:keys [conn client]} (seed/create-runtime)]
+    (seed/install-foundation! conn client)
+    (let [db        (d/db conn)
+          groups    (explorer/resource-panel-data db client (app-state {}))
+          group-map (into {} (map (juxt :resource-type identity)) groups)]
+      (is (= [:account :team :vpc :server] (mapv :resource-type groups)))
+      (is (= "pending" (:count-status (:account group-map))))
+      (is (= "pending" (:count-status (:server group-map))))
+      (is (every? false? (map :expanded? groups))))))
+
+(deftest resource-panel-pagination-uses-opaque-cursors
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [db             (d/db conn)
+            first-page     (explorer/resource-panel-data db client
+                             (app-state {:subject-id     "user-1"
+                                         :permission     :view
+                                         :group-expanded #{:server}}))
+            server-group-1 (some #(when (= :server (:resource-type %)) %) first-page)
+            next-cursor    (:next-cursor server-group-1)
+            page-1-ids     (mapv :id (:items server-group-1))
+            second-page    (explorer/resource-panel-data db client
+                             (app-state {:subject-id     "user-1"
+                                         :permission     :view
+                                         :group-expanded #{:server}
+                                         :group-prev     {:server [next-cursor]}}))
+            server-group-2 (some #(when (= :server (:resource-type %)) %) second-page)
+            page-2-ids     (mapv :id (:items server-group-2))]
+        (is (string? next-cursor))
+        (is (= 20 (count page-1-ids)))
+        (is (= 20 (count page-2-ids)))
+        (is (empty? (set/intersection (set page-1-ids) (set page-2-ids))))))))
+
+(deftest nested-resource-groups-query-via-eacl-api
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [db             (d/db conn)
+            account        {:type :account :id "account-0001"}
+            section-key    (explorer/child-group-key account :server)
+            expected-total (->> (eacl/read-relationships client
+                                  {:subject/type      :account
+                                   :subject/id        "account-0001"
+                                   :resource/type     :server
+                                   :resource/relation :account})
+                                (map :resource)
+                                distinct
+                                (filter #(eacl/can? client (seed/->user "user-1") :view %))
+                                count)
+            panel          (explorer/resource-panel-data db client
+                             (app-state {:subject-id             "user-1"
+                                         :permission             :view
+                                         :group-expanded         #{:account}
+                                         :expanded-resource-keys #{(explorer/resource-key account)}
+                                         :expanded-section-keys  #{section-key}}))
+            account-group  (some #(when (= :account (:resource-type %)) %) panel)
+            account-node   (first (:items account-group))
+            server-group   (some #(when (= :server (:resource-type %)) %) (get-in account-node [:children :groups]))]
+        (is (= expected-total (:total server-group)))
+        (is (= 60 expected-total))))))
+
+(deftest detail-data-preserves-selected-resource
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [db      (d/db conn)
+            details (explorer/resource-detail-data db client
+                      (app-state {:selected-resource {:type :server :id "server-0001-0001"}
+                                  :subject-id         "user-1"}))]
+        (is (= "server-0001-0001" (get-in details [:resource :id])))
+        (is (= :server (get-in details [:resource :type])))
+        (is (seq (:permissions details)))))))
+
+(deftest schema-panel-data-includes-source-and-permission-nodes
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [db         (d/db conn)
+            panel-data (explorer/schema-panel-data db client)]
+        (is (string? (:schema-text panel-data)))
+        (is (re-find #"definition account" (:schema-text panel-data)))
+        (is (some #(= "permission" (:kind %)) (:nodes panel-data)))
+        (is (some #(= "defines" (:kind %)) (:links panel-data)))
+        (is (some #(= "permission" (:kind %)) (:links panel-data)))))))
+
+(deftest schema-changes-mark-unsupported-resource-permissions-without-dropping-groups
+  (let [{:keys [conn client]} (seed/create-runtime)
+        server-viewless
+        "definition user {}
+
+         definition platform {
+           relation super_admin: user
+         }
+
+         definition account {
+           relation owner: user
+           relation platform: platform
+
+           permission admin = owner + platform->super_admin
+           permission view = admin
+         }
+
+         definition team {
+           relation account: account
+           relation leader: user
+
+           permission admin = account->admin + leader
+           permission view = admin
+         }
+
+         definition vpc {
+           relation account: account
+           relation shared_admin: user
+
+           permission admin = account->admin + shared_admin
+           permission view = admin
+         }
+
+         definition server {
+           relation account: account
+           relation team: team
+           relation vpc: vpc
+           relation shared_admin: user
+
+           permission admin = account->admin + shared_admin
+         }"]
+    (seed/install-schema+fixtures! conn client {:seed/profile :smoke})
+    (eacl/write-schema! client server-viewless)
+    (let [db           (d/db conn)
+          server-group (->> (explorer/resource-panel-data db client (app-state {:permission :view}))
+                            (some #(when (= :server (:resource-type %)) %)))]
+      (is server-group)
+      (is (false? (:supported? server-group)))
+      (is (= "unavailable" (:count-status server-group)))
+      (is (= ":view is not defined for server."
+             (:notice server-group))))))

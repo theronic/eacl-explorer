@@ -1,0 +1,16 @@
+{:deps true
+ :dev-http {18091 "resources/public"}
+ :builds
+ {:app
+ {:target :browser
+   :devtools {:preloads [shadow.cljs.devtools.client.browser]}
+   :output-dir "resources/public/js"
+   :asset-path "/js"
+   :modules {:app {:init-fn eacl.explorer.core/init!}}}
+
+  :test
+  {:target :browser
+   :devtools {:preloads [shadow.cljs.devtools.client.browser]}
+   :output-dir "resources/public/test/js"
+   :asset-path "/test/js"
+   :modules {:test {:init-fn eacl.explorer.test-runner/init!}}}}}
