@@ -1,4 +1,5 @@
 (ns eacl.explorer.seed
+  (:require-macros [eacl.explorer.resource-macros :refer [inline-resource]])
   (:require [datascript.core :as d]
             [eacl.core :as eacl :refer [->Relationship spice-object]]
             [eacl.datascript.core :as datascript]
@@ -60,45 +61,7 @@
    :seed/seed-runs      {}})
 
 (def multipath-schema-dsl
-  "definition user {}
-
-   definition platform {
-     relation super_admin: user
-   }
-
-   definition account {
-     relation owner: user
-     relation platform: platform
-
-     permission admin = owner + platform->super_admin
-     permission view = admin
-   }
-
-   definition team {
-     relation account: account
-     relation leader: user
-
-     permission admin = account->admin + leader
-     permission view = admin
-   }
-
-   definition vpc {
-     relation account: account
-     relation shared_admin: user
-
-     permission admin = account->admin + shared_admin
-     permission view = admin
-   }
-
-   definition server {
-     relation account: account
-     relation team: team
-     relation vpc: vpc
-     relation shared_admin: user
-
-     permission admin = account->admin + shared_admin
-     permission view = admin + account->view + team->view + vpc->view + shared_admin
-   }")
+  (inline-resource "eacl/explorer/default-schema.zed"))
 
 (def ->user (partial spice-object :user))
 (def ->team (partial spice-object :team))
@@ -117,12 +80,19 @@
     {:entity->object-id     (fn [entity] (:eacl/id entity))
      :object-id->lookup-ref (fn [object-id] [:eacl/id object-id])}))
 
+(defonce conn (create-conn))
+(defonce client (make-client conn))
+
+(def shared-runtime
+  {:conn conn
+   :client client})
+
 (defn create-runtime
   []
-  (let [conn   (create-conn)
-        client (make-client conn)]
-    {:conn conn
-     :client client}))
+  (let [conn'   (create-conn)
+        client' (make-client conn')]
+    {:conn conn'
+     :client client'}))
 
 (defn normalize-profile
   [profile]

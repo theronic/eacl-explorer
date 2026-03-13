@@ -1,0 +1,39 @@
+definition user {}
+
+definition platform {
+  relation super_admin: user
+}
+
+definition account {
+  relation owner: user
+  relation platform: platform
+
+  permission admin = owner + platform->super_admin
+  permission view = admin
+}
+
+definition team {
+  relation account: account
+  relation leader: user
+
+  permission admin = account->admin + leader
+  permission view = admin
+}
+
+definition vpc {
+  relation account: account
+  relation shared_admin: user
+
+  permission admin = account->admin + shared_admin
+  permission view = admin
+}
+
+definition server {
+  relation account: account
+  relation team: team
+  relation vpc: vpc
+  relation shared_admin: user
+
+  permission admin = account->admin + shared_admin
+  permission view = admin + account->view + team->view + vpc->view + shared_admin
+}

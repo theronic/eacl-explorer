@@ -35,6 +35,12 @@
   [expected actual]
   (= expected actual))
 
+(defn- permission-label
+  [permission]
+  (if permission
+    (str ":" (name permission))
+    "No permission"))
+
 (defn- selected-resource?
   [selected resource]
   (and selected
@@ -101,12 +107,21 @@
     (pagination-summary page-start page-end total time)))
 
 (defn- section-count-text
-  [{:keys [expanded? page-start page-end total time supported?]}]
+  [{:keys [expanded? page-start page-end total time supported? load-status total-status]}]
   (if-not supported?
     "n/a"
-    (if expanded?
-    (pagination-summary page-start page-end total time)
-    (str (format-count total) " total"))))
+    (let [total-text (case total-status
+                       "ready" total
+                       "error" "error"
+                       "...")]
+      (case load-status
+        "error" "error"
+        "ready" (if expanded?
+                  (pagination-summary page-start page-end total-text time)
+                  (if (= "ready" total-status)
+                    (str (format-count total) " total")
+                    total-text))
+        "..."))))
 
 (declare render-resource-node)
 
@@ -299,7 +314,7 @@
    [:div.panel-summary
     [:span.panel-summary__value subject-id]
     [:span.panel-summary__separator "·"]
-    [:span.panel-summary__value (str ":" (name permission))]]
+    [:span.panel-summary__value (permission-label permission)]]
    (for [group groups]
      [:div {:key (name (:resource-type group))}
       (render-group selected-resource group)])])
@@ -347,9 +362,11 @@
 
 (defn- render-schema-graph!
   [panel-data]
-  (when-let [renderer (some-> js/window .-EaclSchemaGraph .-render)]
+  (when (and (:expanded? panel-data)
+             (some-> js/document (.getElementById "schema-graph-canvas")))
+    (when-let [renderer (some-> js/window .-EaclSchemaGraph .-render)]
     (renderer "schema-graph-canvas"
-      (clj->js (select-keys panel-data [:nodes :links])))))
+      (clj->js (select-keys panel-data [:nodes :links]))))))
 
 (rum/defcs schema-panel <
   {:did-mount
@@ -362,39 +379,47 @@
      state)}
   [rum-state panel-data]
   [:div.panel-card.panel-card--graph
-   [:div.panel-heading
-    [:p.panel-kicker "Schema"]]
-   [:div.schema-panel
-    [:section.schema-panel__pane
-     [:div.section-header
-      [:div
-        [:p.panel-label "Spice Schema"]
-       [:p.section-meta
-        (cond
-          (:changed? panel-data) "Unsaved changes"
-          (:writing? panel-data) "Writing schema"
-          :else "Live schema")]]
-      [:button.pagination-button
-       {:disabled (:write-disabled? panel-data)
-        :on-click #(app-state/write-schema!)}
-       "Write Schema"]]
-     (when-let [error (:error panel-data)]
-       [:div.error-block error])
-     [:textarea.schema-editor
-      {:id        "schema-editor"
-       :name      "schema-editor"
-       :value     (:draft-text panel-data)
-       :on-change #(app-state/set-schema-draft! (.. % -target -value))
-       :spellCheck false}]]
-    [:section.schema-panel__pane
-     [:div.section-header
-      [:div
-        [:p.panel-label "Schema Graph"]
-       [:p.section-meta "Resources, permissions, and relation paths"]]]
-     [:div#schema-graph-canvas.graph-canvas]]]])
+   {:class (when-not (:expanded? panel-data) "panel-card--collapsed")}
+   [:div.panel-heading.schema-shell__header
+   [:button.group-card__toggle
+     {:on-click #(app-state/toggle-schema!)}
+     [:span.group-card__caret (if (:expanded? panel-data) "▾" "▸")]
+     [:span.group-card__title "Schema"]]
+    (when-let [status-text (cond
+                             (:writing? panel-data) "Writing schema"
+                             (:changed? panel-data) "Unsaved changes"
+                             :else nil)]
+      [:div.group-card__stats
+       [:span.section-meta status-text]])]
+   (when (:expanded? panel-data)
+     [:div.schema-panel
+      [:section.schema-panel__pane
+       [:div.section-header
+        [:div
+         [:p.panel-label "Spice Schema"]
+         [:p.section-meta "Edit the Spice schema and click Write Schema"]]]
+       [:textarea.schema-editor
+        {:id        "schema-editor"
+         :name      "schema-editor"
+         :value     (:draft-text panel-data)
+         :on-change #(app-state/set-schema-draft! (.. % -target -value))
+         :spellCheck false}]
+       [:div.schema-panel__actions
+        (when-let [error (:error panel-data)]
+          [:div.error-block error])
+        [:button.pagination-button
+         {:disabled (:write-disabled? panel-data)
+          :on-click #(app-state/write-schema!)}
+         "Write Schema"]]]
+      [:section.schema-panel__pane
+       [:div.section-header
+        [:div
+         [:p.panel-label "Schema Graph"]
+         [:p.section-meta "Resources, permissions, and relation paths"]]]
+       [:div#schema-graph-canvas.graph-canvas]]])])
 
 (defn- shell-header
-  [bootstrap show-schema? seed-size-input]
+  [bootstrap seed-size-input]
   (let [stat   (explorer/server-stat-data {:bootstrap bootstrap})
         status (:status bootstrap :booting)]
     [:header.app-header
@@ -403,13 +428,17 @@
       [:h1.app-title "EACL Explorer"]
       [:p.app-subtitle
        (case status
-         :ready   "Client-side EACL browsing with opaque cursors and lazy top-level counts."
+         :ready   "This EACL demo is backed by a client-side DataScript database, but would typically run server-side, backed by Datomic Pro or Datomic Cloud."
          :seeding "Appending benchmark-style data into the live DataScript explorer."
          :writing-schema "Applying Spice schema changes to the live explorer."
          "Booting the client explorer.")]]
      [:div.app-header__actions
       [:div.stat-host (server-stat-node stat)]
-      [:div.seed-controls
+      [:form.seed-controls
+       {:on-submit (fn [event]
+                     (.preventDefault event)
+                     (when (= :ready status)
+                       (app-state/seed-db!)))}
        [:input.seed-input
         {:id        "seed-size"
          :name      "seed-size"
@@ -419,15 +448,9 @@
          :value     seed-size-input
          :on-change #(app-state/set-seed-size! (.. % -target -value))}]
        [:button.graph-toggle
-        {:disabled (not= :ready status)
-         :on-click #(app-state/seed-db!)}
+        {:type "submit"
+         :disabled (not= :ready status)}
         "Seed DB"]]
-      [:button.graph-toggle
-       {:disabled (= :booting status)
-        :on-click #(app-state/toggle-schema!)}
-       (if show-schema?
-         "Hide Schema"
-         "Show Schema")]
       (when-let [seed-error (:seed-error bootstrap)]
         [:div.error-block.app-header__error seed-error])]]))
 
@@ -459,7 +482,7 @@
 
 (defn- group-view-state
   [resource-type subject-id permission group-expanded group-cursors
-   expanded-resource-keys expanded-section-keys nested-prev count-entry db-rev]
+   expanded-resource-keys expanded-section-keys nested-prev count-entry child-sections db-rev]
   {:ui {:subject-id             subject-id
         :permission             permission
         :group-expanded         (if (contains? group-expanded resource-type)
@@ -470,6 +493,7 @@
         :expanded-section-keys  expanded-section-keys
         :nested-prev            nested-prev}
    :counts {resource-type count-entry}
+   :child-sections child-sections
    :db-rev db-rev})
 
 (defn- detail-view-state
@@ -482,23 +506,23 @@
 (rum/defcs shell-header-view < rum/reactive
   [rum-state]
   (let [bootstrap    (rum/react (rum/cursor-in app-state/!app [:bootstrap]))
-        show-schema? (boolean (rum/react (rum/cursor-in app-state/!app [:ui :show-schema?])))
         seed-size-input (rum/react (rum/cursor-in app-state/!app [:ui :seed-size-input]))]
-    (shell-header bootstrap show-schema? seed-size-input)))
+    (shell-header bootstrap seed-size-input)))
 
 (rum/defcs schema-shell-view < rum/reactive
   [rum-state]
   (let [bootstrap    (rum/react (rum/cursor-in app-state/!app [:bootstrap]))
-        show-schema? (boolean (rum/react (rum/cursor-in app-state/!app [:ui :show-schema?])))
+        schema-expanded? (boolean (rum/react (rum/cursor-in app-state/!app [:ui :schema-expanded?])))
         schema-draft (rum/react (rum/cursor-in app-state/!app [:ui :schema-draft]))
         db-rev       (rum/react (rum/cursor-in app-state/!app [:db-rev]))
         ready?       (not= :booting (:status bootstrap))
         db           (app-state/db)
         acl          (app-state/client)]
-    (when (and ready? show-schema?)
+    (when ready?
       [:section.schema-shell
        (schema-panel
          (assoc (explorer/schema-panel-data db acl {:db-rev db-rev})
+           :expanded?      schema-expanded?
            :draft-text     schema-draft
            :changed?       (not= schema-draft (explorer/schema-source db))
            :writing?       (= :writing-schema (:status bootstrap))
@@ -512,13 +536,18 @@
         acl           (app-state/client)
         subject-id    (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
         permission    (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+        selected-resource (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
         user-page     (rum/react (rum/cursor-in app-state/!app [:ui :user-page]))
         db-rev        (rum/react (rum/cursor-in app-state/!app [:db-rev]))
-        view-state    (subject-view-state subject-id permission user-page db-rev)
+        view-state    (assoc (subject-view-state subject-id permission user-page db-rev)
+                        :ui {:subject-id        subject-id
+                             :permission        permission
+                             :user-page         user-page
+                             :selected-resource selected-resource})
         subject-data  (explorer/paged-known-users db nil acl view-state)]
     (subject-panel {:current-subject subject-id
                     :permission      permission
-                    :permissions     (explorer/available-permissions acl)
+                    :permissions     (explorer/selectable-permissions db acl view-state)
                     :quick-subjects  explorer/quick-subjects
                     :user-page       subject-data})))
 
@@ -534,6 +563,7 @@
         expanded-section-keys  (rum/react (rum/cursor-in app-state/!app [:ui :expanded-section-keys]))
         nested-prev            (rum/react (rum/cursor-in app-state/!app [:ui :nested-prev]))
         count-entry            (rum/react (rum/cursor-in app-state/!app [:counts resource-type]))
+        child-sections         (rum/react (rum/cursor-in app-state/!app [:child-sections]))
         selected-resource      (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
         db-rev                 (rum/react (rum/cursor-in app-state/!app [:db-rev]))
         view-state             (group-view-state resource-type
@@ -545,6 +575,7 @@
                                  expanded-section-keys
                                  nested-prev
                                  count-entry
+                                 child-sections
                                  db-rev)]
     (render-group selected-resource
       (explorer/group-data db acl view-state resource-type))))
@@ -554,7 +585,7 @@
   (let [subject-id      (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
         permission      (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
         db-rev          (rum/react (rum/cursor-in app-state/!app [:db-rev]))
-        resource-types  (explorer/query-resource-types (app-state/client))]
+        resource-types  (explorer/query-resource-types (app-state/db) (app-state/client))]
     [:div.panel-card
      [:div.panel-heading
       [:p.panel-kicker "Resources"]]

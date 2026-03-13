@@ -45,12 +45,88 @@
   function linkDistance(link) {
     switch (link.kind) {
       case "defines":
-        return 62;
+        return 56;
       case "permission":
-        return 92;
+        return 84;
       default:
-        return 138;
+        return 112;
     }
+  }
+
+  function typeOrder(type) {
+    switch (type) {
+      case "account":
+        return 0;
+      case "team":
+        return 1;
+      case "vpc":
+        return 2;
+      case "server":
+        return 3;
+      case "user":
+        return 4;
+      case "platform":
+        return 5;
+      default:
+        return 99;
+    }
+  }
+
+  function permissionSort(a, b) {
+    if (a.resourceType !== b.resourceType) {
+      return typeOrder(a.resourceType) - typeOrder(b.resourceType);
+    }
+    return String(a.id).localeCompare(String(b.id));
+  }
+
+  function buildAnchors(nodes, width, height) {
+    var resourceNodes = nodes
+      .filter(function (node) {
+        return node.kind !== "permission";
+      })
+      .sort(function (a, b) {
+        return typeOrder(a.type || a.id) - typeOrder(b.type || b.id);
+      });
+    var resourceCount = Math.max(resourceNodes.length, 1);
+    var left = 96;
+    var right = Math.max(left, width - 96);
+    var step = resourceCount === 1 ? 0 : (right - left) / (resourceCount - 1);
+    var anchors = {};
+
+    resourceNodes.forEach(function (node, index) {
+      var x = resourceCount === 1 ? width / 2 : left + (step * index);
+      anchors[node.id] = {x: x, y: height * 0.22};
+    });
+
+    var permissionsByType = {};
+    nodes
+      .filter(function (node) {
+        return node.kind === "permission";
+      })
+      .sort(permissionSort)
+      .forEach(function (node) {
+        var key = node.resourceType || node.type || node.id;
+        if (!permissionsByType[key]) {
+          permissionsByType[key] = [];
+        }
+        permissionsByType[key].push(node);
+      });
+
+    Object.keys(permissionsByType).forEach(function (resourceType) {
+      var permissionNodes = permissionsByType[resourceType];
+      var baseX = anchors[resourceType] ? anchors[resourceType].x : width / 2;
+      permissionNodes.forEach(function (node, index) {
+        var columns = Math.min(2, permissionNodes.length);
+        var column = index % columns;
+        var row = Math.floor(index / columns);
+        anchors[node.id] = {
+          x: baseX + ((column - ((columns - 1) / 2)) * 118),
+          y: (height * 0.56) + (row * 78)
+        };
+      });
+    });
+
+    return anchors;
   }
 
   function render(containerId, graphData) {
@@ -96,24 +172,66 @@
         .attr("fill", "#0d8f73");
 
       var nodes = (graphData.nodes || []).map(function (node) {
-        return Object.assign({x: width / 2, y: height / 2}, node);
+        return Object.assign({}, node);
       });
       var links = (graphData.links || []).map(function (link) {
         return Object.assign({}, link);
       });
+      var anchors = buildAnchors(nodes, width, height);
+
+      nodes.forEach(function (node) {
+        var anchor = anchors[node.id] || {x: width / 2, y: height / 2};
+        node.x = anchor.x;
+        node.y = anchor.y;
+        node.vx = 0;
+        node.vy = 0;
+      });
 
       var simulation = d3.forceSimulation(nodes)
+        .alpha(0.9)
+        .alphaDecay(0.16)
+        .velocityDecay(0.42)
         .force("link", d3.forceLink(links)
           .id(function (node) {
             return node.id;
           })
           .distance(linkDistance)
           .strength(function (link) {
-            return link.kind === "defines" ? 0.7 : 0.35;
+            return link.kind === "defines" ? 0.9 : (link.kind === "permission" ? 0.55 : 0.45);
           }))
-        .force("charge", d3.forceManyBody().strength(-430))
-        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("charge", d3.forceManyBody().strength(-120))
+        .force("x", d3.forceX(function (node) {
+          return (anchors[node.id] || {x: width / 2}).x;
+        }).strength(function (node) {
+          return node.kind === "permission" ? 0.32 : 0.2;
+        }))
+        .force("y", d3.forceY(function (node) {
+          return (anchors[node.id] || {y: height / 2}).y;
+        }).strength(function (node) {
+          return node.kind === "permission" ? 0.32 : 0.2;
+        }))
         .force("collision", d3.forceCollide().radius(collisionRadius));
+
+      function updatePositions() {
+        link
+          .attr("x1", function (item) { return item.source.x; })
+          .attr("y1", function (item) { return item.source.y; })
+          .attr("x2", function (item) { return item.target.x; })
+          .attr("y2", function (item) { return item.target.y; });
+
+        linkLabel
+          .attr("x", function (item) { return (item.source.x + item.target.x) / 2; })
+          .attr("y", function (item) { return (item.source.y + item.target.y) / 2; });
+
+        node.attr("transform", function (item) {
+          return "translate(" + item.x + "," + item.y + ")";
+        });
+      }
+
+      simulation.stop();
+      for (var i = 0; i < 90; i += 1) {
+        simulation.tick();
+      }
 
       var link = svg.append("g")
         .attr("stroke-linecap", "round")
@@ -150,10 +268,28 @@
           return item.label;
         });
 
+      simulation.on("tick", updatePositions);
+
+      var settleTimer = null;
+
+      function scheduleStop(delay) {
+        if (settleTimer) {
+          window.clearTimeout(settleTimer);
+        }
+        settleTimer = window.setTimeout(function () {
+          simulation.stop();
+          updatePositions();
+        }, delay);
+      }
+
       var drag = d3.drag()
         .on("start", function (event, node) {
+          if (settleTimer) {
+            window.clearTimeout(settleTimer);
+            settleTimer = null;
+          }
           if (!event.active) {
-            simulation.alphaTarget(0.32).restart();
+            simulation.alpha(0.24).alphaTarget(0.1).restart();
           }
           node.fx = node.x;
           node.fy = node.y;
@@ -161,6 +297,7 @@
         .on("drag", function (event, node) {
           node.fx = event.x;
           node.fy = event.y;
+          updatePositions();
         })
         .on("end", function (event, node) {
           if (!event.active) {
@@ -168,6 +305,7 @@
           }
           node.fx = null;
           node.fy = null;
+          scheduleStop(220);
         });
 
       var node = svg.append("g")
@@ -247,21 +385,7 @@
             : (item.label || item.id);
         });
 
-      simulation.on("tick", function () {
-        link
-          .attr("x1", function (item) { return item.source.x; })
-          .attr("y1", function (item) { return item.source.y; })
-          .attr("x2", function (item) { return item.target.x; })
-          .attr("y2", function (item) { return item.target.y; });
-
-        linkLabel
-          .attr("x", function (item) { return (item.source.x + item.target.x) / 2; })
-          .attr("y", function (item) { return (item.source.y + item.target.y) / 2; });
-
-        node.attr("transform", function (item) {
-          return "translate(" + item.x + "," + item.y + ")";
-        });
-      });
+      updatePositions();
     });
   }
 

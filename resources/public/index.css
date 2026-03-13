@@ -158,6 +158,7 @@ button {
   display: flex;
   gap: 10px;
   align-items: center;
+  margin: 0;
 }
 
 .seed-input {
@@ -221,6 +222,11 @@ button {
 
 .panel-card--graph {
   min-height: 0;
+}
+
+.panel-card--collapsed {
+  gap: 0;
+  padding-bottom: 14px;
 }
 
 .panel-heading {
@@ -527,6 +533,10 @@ button {
   background: linear-gradient(180deg, #fff9ef, #f9f2e4);
 }
 
+.schema-shell__header {
+  min-height: 40px;
+}
+
 .schema-panel {
   display: grid;
   grid-template-columns: minmax(320px, 0.95fr) minmax(380px, 1.25fr);
@@ -539,6 +549,13 @@ button {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+}
+
+.schema-panel__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .schema-editor {

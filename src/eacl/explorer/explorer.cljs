@@ -1,5 +1,6 @@
 (ns eacl.explorer.explorer
-  (:require [datascript.core :as d]
+  (:require [clojure.string :as str]
+            [datascript.core :as d]
             [eacl.core :as eacl]
             [eacl.spicedb.consistency :as consistency]
             [eacl.explorer.seed :as seed]
@@ -12,6 +13,8 @@
   [{:id "super-user" :label "Super User"}
    {:id "user-1" :label "User 1"}
    {:id "user-2" :label "User 2"}])
+(def quick-subject-order
+  (zipmap (map :id quick-subjects) (range)))
 
 (def resource-page-size 20)
 (def user-page-size 20)
@@ -27,7 +30,7 @@
    :expanded-resource-keys #{}
    :expanded-section-keys  #{}
    :nested-prev            {}
-   :show-schema?           false
+   :schema-expanded?       false
    :schema-draft           seed/multipath-schema-dsl
    :seed-size-input        (str seed/default-seed-size)})
 
@@ -101,6 +104,12 @@
   [{:keys [type id]}]
   (str (name type) "|" id))
 
+(defn parse-resource-key
+  [key']
+  (when-let [[_ type id] (re-matches #"([^|]+)\|(.*)" (str key'))]
+    {:type (keyword type)
+     :id   id}))
+
 (defn resource-expanded?
   [state resource]
   (contains? (or (get-in state [:ui :expanded-resource-keys])
@@ -135,12 +144,21 @@
 
 (defn- user-sort-key
   [user-id]
-  [(case user-id
-     "super-user" 0
-     "user-1" 1
-     "user-2" 2
-     99)
-   user-id])
+  (cond
+    (contains? quick-subject-order user-id)
+    [0 (get quick-subject-order user-id) user-id]
+
+    (str/starts-with? user-id "owner-")
+    [1 0 user-id]
+
+    (str/starts-with? user-id "shared-admin-")
+    [2 0 user-id]
+
+    (str/starts-with? user-id "leader-")
+    [3 0 user-id]
+
+    :else
+    [4 0 user-id]))
 
 (defn- permission-sort-key
   [permission]
@@ -159,52 +177,109 @@
   [acl]
   (eacl/read-schema acl))
 
-(defn query-resource-types
-  [acl]
-  (if-not acl
-    default-resource-types
-    (let [{:keys [permissions]} (schema-data acl)]
-      (->> (map :eacl.permission/resource-type permissions)
-           (remove nil?)
-           distinct
-           (sort-by resource-type-sort-key)
-           vec))))
-
-(defn permissions-by-type
-  [acl]
-  (let [{:keys [permissions]} (schema-data acl)]
-    (->> permissions
-         (group-by :eacl.permission/resource-type)
-         (map (fn [[resource-type perms]]
+(defn- permissions-by-type-from-db
+  [db]
+  (when db
+    (->> (d/q '[:find ?resource-type ?permission-name
+                :where
+                [?permission :eacl.permission/resource-type ?resource-type]
+                [?permission :eacl.permission/permission-name ?permission-name]]
+              db)
+         (group-by first)
+         (map (fn [[resource-type rows]]
                 [resource-type
-                 (->> perms
-                      (map :eacl.permission/permission-name)
+                 (->> rows
+                      (map second)
                       distinct
                       (sort-by permission-sort-key)
                       vec)]))
          (into {}))))
 
+(defn- resource-types-from-db
+  [db]
+  (when db
+    (->> (d/q '[:find [?resource-type ...]
+                :where
+                [_ :eacl.permission/resource-type ?resource-type]]
+              db)
+         distinct
+         (sort-by resource-type-sort-key)
+         vec)))
+
+(defn query-resource-types
+  ([acl]
+   (query-resource-types nil acl))
+  ([db acl]
+   (cond
+     (some? db)
+     (or (resource-types-from-db db)
+         default-resource-types)
+
+     (not acl)
+    default-resource-types
+
+     :else
+     (let [{:keys [permissions]} (schema-data acl)]
+       (->> (map :eacl.permission/resource-type permissions)
+            (remove nil?)
+            distinct
+            (sort-by resource-type-sort-key)
+            vec)))))
+
+(defn permissions-by-type
+  ([acl]
+   (permissions-by-type nil acl))
+  ([db acl]
+   (or (permissions-by-type-from-db db)
+       (let [{:keys [permissions]} (schema-data acl)]
+         (->> permissions
+              (group-by :eacl.permission/resource-type)
+              (map (fn [[resource-type perms]]
+                     [resource-type
+                      (->> perms
+                           (map :eacl.permission/permission-name)
+                           distinct
+                           (sort-by permission-sort-key)
+                           vec)]))
+              (into {}))))))
+
+(defn- available-permissions-from-schema
+  [db acl]
+  (->> (permissions-by-type db acl)
+       vals
+       (apply concat)
+       distinct
+       (sort-by permission-sort-key)
+       vec))
+
 (defn available-permissions
   ([acl]
-   (->> (permissions-by-type acl)
-        vals
-        (apply concat)
-        distinct
-        (sort-by permission-sort-key)
-        vec))
+   (available-permissions-from-schema nil acl))
   ([acl _state]
    (available-permissions acl)))
 
+(defn- permissions-for-resource-from-schema
+  [db acl resource-type]
+  (vec (get (permissions-by-type db acl) resource-type [])))
+
 (defn permissions-for-resource
   ([acl resource-type]
-   (vec (get (permissions-by-type acl) resource-type [])))
+   (permissions-for-resource-from-schema nil acl resource-type))
   ([acl _state resource-type]
    (permissions-for-resource acl resource-type)))
 
+(defn selectable-permissions
+  [db acl state]
+  (if-let [resource-type (some-> (selected-resource state) :type)]
+    (permissions-for-resource-from-schema db acl resource-type)
+    (available-permissions-from-schema db acl)))
+
 (defn permission-available?
-  [acl resource-type permission]
+  ([acl resource-type permission]
+   (permission-available? nil acl resource-type permission))
+  ([db acl resource-type permission]
   (and permission
-       (contains? (set (permissions-for-resource acl resource-type)) permission)))
+       (contains? (set (permissions-for-resource-from-schema db acl resource-type)) permission))))
 
 (defn relations-by-parent
   [acl]
@@ -235,6 +310,46 @@
    (vec (get-in (relations-by-parent acl) [parent-type resource-type] [])))
   ([acl _state parent-type resource-type]
    (child-relation-defs acl parent-type resource-type)))
+
+(defn child-permission-implied-by-parent?
+  [acl parent-type child-type relation-name permission]
+  (when (and acl parent-type child-type relation-name permission)
+    (let [{:keys [relations permissions]} (schema-data acl)
+          relation-targets               (into {}
+                                          (map (fn [relation]
+                                                 [[(:eacl.relation/resource-type relation)
+                                                   (:eacl.relation/relation-name relation)]
+                                                  (:eacl.relation/subject-type relation)]))
+                                          relations)
+          permission-rows                (group-by (juxt :eacl.permission/resource-type
+                                                         :eacl.permission/permission-name)
+                                                   permissions)]
+      (loop [pending (list [child-type permission])
+             seen    #{}]
+        (when-let [[resource-type permission-name :as node] (first pending)]
+          (if (contains? seen node)
+            (recur (rest pending) seen)
+            (let [rows      (get permission-rows node)
+                  implied?  (some (fn [{:eacl.permission/keys [source-relation-name
+                                                               target-type
+                                                               target-name]}]
+                                    (and (= relation-name source-relation-name)
+                                         (= :permission target-type)
+                                         (= permission target-name)
+                                         (= parent-type
+                                            (get relation-targets [resource-type source-relation-name]))))
+                                  rows)
+                  next-rows (keep (fn [{:eacl.permission/keys [source-relation-name
+                                                               target-type
+                                                               target-name]}]
+                                    (when (and (= :self source-relation-name)
+                                               (= :permission target-type))
+                                      [resource-type target-name]))
+                                  rows)]
+              (if implied?
+                true
+                (recur (concat next-rows (rest pending))
+                       (conj seen node))))))))))
 
 (defn schema-source
   [db]
@@ -283,6 +398,22 @@
 (defn hydrate-resource
   [db resource]
   (first (hydrate-objects db [resource])))
+
+(defn hydrate-resources
+  [db resources]
+  (hydrate-objects db resources))
+
+(defn sort-resources
+  [resources]
+  (->> resources
+       (sort-by resource-sort-key)
+       vec))
+
+(defn hydrate-and-sort-resources
+  [db resources]
+  (->> resources
+       (hydrate-objects db)
+       sort-resources))
 
 (defn- known-user-id-stream
   [db]
@@ -364,7 +495,7 @@
   (let [expanded?   (group-expanded? state resource-type)
         count-entry (get-in state [:counts resource-type] {:status "pending"})
         permission  (current-permission state)
-        supported?  (permission-available? acl resource-type permission)
+        supported?  (permission-available? db acl resource-type permission)
         notice      (when-not supported?
                       (permission-notice permission resource-type))]
     (cond-> {:resource-type resource-type
@@ -402,45 +533,7 @@
 
 (declare build-resource-node)
 
-(defn- dedupe-resources
-  [resources]
-  (:items
-   (reduce (fn [{:keys [seen items]} resource]
-             (let [key (resource-key resource)]
-               (if (contains? seen key)
-                 {:seen seen
-                  :items items}
-                 {:seen  (conj seen key)
-                  :items (conj items resource)})))
-     {:seen #{}
-      :items []}
-     resources)))
-
-(defn- child-group-resources
-  [acl parent relation-defs resource-type]
-  (->> relation-defs
-       (mapcat (fn [{relation-name :eacl.relation/relation-name}]
-                 (eacl/read-relationships acl
-                   {:subject/type      (:type parent)
-                    :subject/id        (:id parent)
-                    :resource/type     resource-type
-                    :resource/relation relation-name})))
-       (map :resource)
-       dedupe-resources
-       (sort-by resource-sort-key)
-       vec))
-
-(defn- authorized-child-group-resources
-  [acl state parent relation-defs resource-type]
-  (let [subject    (seed/->user (current-subject-id state))
-        permission (current-permission state)]
-    (if-not (permission-available? acl resource-type permission)
-      []
-      (->> (child-group-resources acl parent relation-defs resource-type)
-           (filter #(eacl/can? acl subject permission % consistency/fully-consistent))
-           vec))))
-
-(defn- paginate-child-resources
+(defn paginate-resources
   [resources cursor-token]
   (let [resources'  (vec resources)
         total       (count resources')
@@ -463,55 +556,71 @@
   [db acl state parent resource-type depth visited]
   (let [section-key   (child-group-key parent resource-type)
         expanded?     (section-expanded? state section-key)
-        relation-defs (child-relation-defs acl state (:type parent) resource-type)
         page-number   (child-group-page-number state section-key)
-        started-at    (now-nanos)
         permission    (current-permission state)
-        supported?    (permission-available? acl resource-type permission)]
-    (try
-      (let [{:keys [items total page-start page-end next-cursor]}
-            (if supported?
-              (paginate-child-resources
-               (authorized-child-group-resources acl state parent relation-defs resource-type)
-               (current-child-group-cursor state section-key))
-              {:items []
-               :total 0
-               :page-start 0
-               :page-end 0
-               :next-cursor nil})
-            hydrated-items (hydrate-objects db items)
-            rendered-items (->> hydrated-items
-                                (remove #(contains? visited (resource-key %)))
-                                (mapv #(build-resource-node db acl state % (inc depth) visited)))]
-        (cond-> {:resource-type resource-type
-                 :section-key   section-key
-                 :parent        parent
-                 :parent-depth  depth
-                 :expanded?     expanded?
-                 :page-number   page-number
-                 :supported?    supported?
-                 :notice        (when-not supported?
-                                  (permission-notice permission resource-type))
-                 :total         total
-                 :time          (- (now-nanos) started-at)}
-          expanded?
-          (assoc :page-start  page-start
-                 :page-end    page-end
-                 :items       rendered-items
-                 :next-cursor next-cursor)))
-      (catch :default ex
-        {:resource-type resource-type
-         :section-key   section-key
-         :parent        parent
-         :parent-depth  depth
-         :expanded?     expanded?
-         :page-number   page-number
-         :total         0
-         :page-start    0
-         :page-end      0
-         :items         []
-         :error         (ex-message ex)
-         :time          (- (now-nanos) started-at)}))))
+        supported?    (permission-available? db acl resource-type permission)
+        cursor-token  (current-child-group-cursor state section-key)
+        entry         (let [entry' (get-in state [:child-sections section-key])]
+                        (when (= cursor-token (:cursor-token entry'))
+                          entry'))
+        status        (cond
+                        (not supported?) "unavailable"
+                        (some? entry) (:status entry)
+                        :else "idle")
+        total-status  (cond
+                        (not supported?) "unavailable"
+                        (= "error" status) "error"
+                        (string? (:total-status entry)) (:total-status entry)
+                        (number? (:total entry)) "ready"
+                        (= "ready" status) "loading"
+                        :else "loading")
+        ready?        (= "ready" status)
+        {:keys [items total page-start page-end next-cursor]}
+        (if ready?
+          {:items       (vec (or (:items entry) []))
+           :total       (:total entry)
+           :page-start  (:page-start entry)
+           :page-end    (:page-end entry)
+           :next-cursor (:next-cursor entry)}
+          {:items []
+           :total nil
+           :page-start 0
+           :page-end 0
+           :next-cursor nil})
+        rendered-items (when ready?
+                         (->> items
+                              (remove #(contains? visited (resource-key %)))
+                              (mapv #(build-resource-node db acl state % (inc depth) visited))))
+        loading-notice (when (and expanded?
+                                  supported?
+                                  (not ready?)
+                                  (not= "error" status))
+                         "Loading resources...")]
+    (cond-> {:resource-type resource-type
+             :section-key   section-key
+             :parent        parent
+             :parent-depth  depth
+             :expanded?     expanded?
+             :page-number   page-number
+             :supported?    supported?
+             :load-status   status
+             :total-status  total-status
+             :notice        (when-not supported?
+                              (permission-notice permission resource-type))
+             :total         (when ready? total)
+             :time          (:time entry)}
+      (= "error" status)
+      (assoc :error (:error entry))
+
+      expanded?
+      (assoc :page-start  page-start
+             :page-end    page-end
+             :items       (or rendered-items [])
+             :next-cursor next-cursor
+             :notice      (or (:notice entry)
+                              loading-notice
+                              (when-not supported?
+                                (permission-notice permission resource-type)))))))
 
 (defn- read-child-groups
   [db acl state parent depth visited]
@@ -548,7 +657,7 @@
 
 (defn resource-panel-data
   [db acl state]
-  (mapv #(group-data db acl state %) (query-resource-types acl)))
+  (mapv #(group-data db acl state %) (query-resource-types db acl)))
 
 (defn resource-node-data
   [db acl state resource-type resource-id depth]
@@ -593,7 +702,7 @@
                         :subjects   []
                         :error      (ex-message ex)
                         :time       (- (now-nanos) started-at)}))))
-           (permissions-for-resource acl state (:type resource)))}))
+           (permissions-for-resource-from-schema db acl (:type resource)))}))
     {:resource nil}))
 
 (defn schema-panel-data
