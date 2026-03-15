@@ -176,6 +176,106 @@
     (is (= "ready" (get-in @state/!app [:child-sections section-key :total-status])))
     (is (nil? (get-in @state/!app [:child-sections section-key :job-id])))))
 
+(deftest single-relation-child-section-pagination-uses-opaque-cursors
+  (let [section-key "team|team-0001-01>server"
+        parent      {:type :team :id "team-0001-01"}
+        relation-def {:eacl.relation/relation-name :team}
+        job-1       "job-1"
+        job-2       "job-2"
+        context-1   {:db-rev        0
+                     :subject-id    "user-1"
+                     :permission    :view
+                     :parent-type   :team
+                     :parent-id     "team-0001-01"
+                     :resource-type :server
+                     :cursor-token  nil}
+        context-2   (assoc context-1 :cursor-token "cursor-2")
+        page-1      (mapv (fn [n] {:type :server :id (str "server-page-1-" n)})
+                          (range 1 21))
+        page-2      (mapv (fn [n] {:type :server :id (str "server-page-2-" n)})
+                          (range 1 21))
+        responses   {nil        {:data   (mapv (fn [resource] {:resource resource}) page-1)
+                                 :cursor "cursor-2"}
+                     "cursor-2" {:data   (mapv (fn [resource] {:resource resource}) page-2)
+                                 :cursor "cursor-3"}}
+        calls       (atom [])]
+    (reset! state/!runtime {:conn :conn :client :client})
+    (reset! state/!app {:bootstrap (ready-bootstrap)
+                        :ui        explorer/default-ui-state
+                        :counts    explorer/default-count-state
+                        :child-sections
+                        {section-key (merge context-1
+                                            {:status       "loading"
+                                             :job-id       job-1
+                                             :items        []
+                                             :total        nil
+                                             :total-status "loading"
+                                             :page-start   0
+                                             :page-end     0
+                                             :next-cursor  nil
+                                             :time         nil
+                                             :error        nil})}
+                        :db-rev    0})
+    (with-redefs [js/setTimeout (fn [f _delay] (f))
+                  state/client (fn [] :acl)
+                  state/db (fn [] :db)
+                  state/read-child-relationships
+                  (fn [_ _ _ _ cursor-token limit]
+                    (swap! calls conj [cursor-token limit])
+                    (get responses cursor-token))
+                  state/launch-single-relation-total-job! (fn [& _] nil)
+                  state/start-expanded-child-sections-for-resources! (fn [& _] nil)
+                  seed/->user (fn [subject-id] {:type :user :id subject-id})
+                  explorer/child-permission-implied-by-parent? (fn [& _] true)
+                  explorer/hydrate-resources (fn [_ resources] (vec resources))]
+      (#'state/launch-single-relation-child-section-job!
+       section-key
+       context-1
+       parent
+       :server
+       relation-def
+       job-1)
+      (let [entry-1 (get-in @state/!app [:child-sections section-key])]
+        (is (= "ready" (:status entry-1)))
+        (is (= "cursor-2" (:next-cursor entry-1)))
+        (is (= 1 (:page-start entry-1)))
+        (is (= 20 (:page-end entry-1)))
+        (is (= (mapv :id page-1)
+               (mapv :id (:items entry-1)))))
+      (swap! state/!app
+             (fn [app]
+               (-> app
+                   (assoc-in [:ui :nested-prev section-key] ["cursor-2"])
+                   (assoc-in [:child-sections section-key]
+                             (merge context-2
+                                    {:status       "loading"
+                                     :job-id       job-2
+                                     :items        []
+                                     :total        nil
+                                     :total-status "loading"
+                                     :page-start   0
+                                     :page-end     0
+                                     :next-cursor  nil
+                                     :time         nil
+                                     :error        nil})))))
+      (#'state/launch-single-relation-child-section-job!
+       section-key
+       context-2
+       parent
+       :server
+       relation-def
+       job-2)
+      (let [entry-2 (get-in @state/!app [:child-sections section-key])]
+        (is (= [[nil explorer/resource-page-size]
+                ["cursor-2" explorer/resource-page-size]]
+               @calls))
+        (is (= "ready" (:status entry-2)))
+        (is (= "cursor-3" (:next-cursor entry-2)))
+        (is (= 21 (:page-start entry-2)))
+        (is (= 40 (:page-end entry-2)))
+        (is (= (mapv :id page-2)
+               (mapv :id (:items entry-2))))))))
+
 (deftest selecting-resource-normalizes-permission-to-selected-resource-schema
   (let [{:keys [conn client]} (seed/create-runtime)
         server-viewless

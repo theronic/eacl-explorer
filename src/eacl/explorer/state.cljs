@@ -376,16 +376,35 @@
 (defn- collect-page-items
   [acl subject permission permission-implied? existing-items relationships]
   (loop [remaining relationships
-         page-items existing-items]
+         page-items existing-items
+         consumed-count 0]
     (if-let [{:keys [resource]} (first remaining)]
       (if (resource-authorized? acl subject permission permission-implied? resource)
         (if (< (count page-items) explorer/resource-page-size)
-          (recur (rest remaining) (conj page-items resource))
+          (recur (rest remaining) (conj page-items resource) (inc consumed-count))
           {:page-items page-items
-           :has-next?  true})
-        (recur (rest remaining) page-items))
+           :page-full? true
+           :consumed-count consumed-count})
+        (recur (rest remaining) page-items (inc consumed-count)))
       {:page-items page-items
-       :has-next?  false})))
+       :page-full? false
+       :consumed-count consumed-count})))
+
+(defn- child-page-batch-limit
+  [permission-implied?]
+  (if permission-implied?
+    explorer/resource-page-size
+    child-section-batch-size))
+
+(defn- replay-child-page-cursor
+  [acl parent resource-type relation-name cursor-token consumed-count]
+  (when (pos? consumed-count)
+    (:cursor (read-child-relationships acl
+                                       parent
+                                       resource-type
+                                       relation-name
+                                       cursor-token
+                                       consumed-count))))
 
 (defn- launch-single-relation-total-job!
   [section-key context parent resource-type relation-name job-id permission-implied?]
@@ -436,8 +455,8 @@
                              resource-type
                              relation-name
                              permission)]
-    (letfn [(finish-page! [page-items has-next?]
-              (if has-next?
+    (letfn [(finish-page! [page-items next-cursor]
+              (if next-cursor
                 (do
                   (publish-ready-child-section! section-key
                                                 job-id
@@ -446,7 +465,7 @@
                                                 page-items
                                                 nil
                                                 "loading"
-                                                (:id (peek page-items))
+                                                next-cursor
                                                 false)
                   (launch-single-relation-total-job! section-key
                                                      context
@@ -467,33 +486,52 @@
             (step [cursor-token page-items]
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
-                  (let [{relationships    :data
+                  (let [batch-limit      (child-page-batch-limit permission-implied?)
+                        {relationships    :data
                          next-batch-cursor :cursor}
                         (read-child-relationships acl
                                                   parent
                                                   resource-type
                                                   relation-name
                                                   cursor-token
-                                                  child-section-batch-size)
-                        more-batches?    (and (= child-section-batch-size (count relationships))
+                                                  batch-limit)
+                        more-batches?    (and (= batch-limit (count relationships))
                                               (some? next-batch-cursor)
-                                              (not= next-batch-cursor cursor-token))
-                        {:keys [page-items has-next?]}
-                        (collect-page-items acl
-                                            subject
-                                            permission
-                                            permission-implied?
-                                            page-items
-                                            relationships)]
-                    (cond
-                      has-next?
-                      (finish-page! page-items true)
+                                              (not= next-batch-cursor cursor-token))]
+                    (if permission-implied?
+                      (finish-page! (mapv :resource relationships)
+                                    (when more-batches?
+                                      next-batch-cursor))
+                      (let [{:keys [page-items page-full? consumed-count]}
+                            (collect-page-items acl
+                                                subject
+                                                permission
+                                                permission-implied?
+                                                page-items
+                                                relationships)
+                            next-page-cursor (cond
+                                               (and page-full? (< consumed-count (count relationships)))
+                                               (replay-child-page-cursor acl
+                                                                         parent
+                                                                         resource-type
+                                                                         relation-name
+                                                                         cursor-token
+                                                                         consumed-count)
 
-                      (and more-batches? next-batch-cursor)
-                      (js/setTimeout #(step next-batch-cursor page-items) 0)
+                                               (and page-full? more-batches?)
+                                               next-batch-cursor
 
-                      :else
-                      (finish-page! page-items false)))
+                                               :else
+                                               nil)]
+                        (cond
+                          next-page-cursor
+                          (finish-page! page-items next-page-cursor)
+
+                          (and more-batches? next-batch-cursor)
+                          (js/setTimeout #(step next-batch-cursor page-items) 0)
+
+                          :else
+                          (finish-page! page-items nil)))))
                   (catch :default ex
                     (publish-child-section! section-key job-id context
                                             {:status "error"
