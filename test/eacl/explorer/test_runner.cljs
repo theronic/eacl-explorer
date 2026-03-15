@@ -1,5 +1,6 @@
 (ns eacl.explorer.test-runner
   (:require [cljs.test :as t]
+            [eacl.explorer.core-test]
             [eacl.explorer.explorer-test]
             [eacl.explorer.seed-test]
             [eacl.explorer.state-test]))
@@ -10,6 +11,7 @@
 
 (defn run-all-tests!
   []
-  (t/run-tests 'eacl.explorer.seed-test
+  (t/run-tests 'eacl.explorer.core-test
+               'eacl.explorer.seed-test
                'eacl.explorer.explorer-test
                'eacl.explorer.state-test))

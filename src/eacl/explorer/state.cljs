@@ -79,7 +79,7 @@
   (let [stored-permission (read-session "eacl-explorer-permission" nil)]
     (assoc explorer/default-ui-state
            :subject-id (read-session "eacl-explorer-subject-id" (:subject-id explorer/default-ui-state))
-           :permission (or (some-> stored-permission keyword)
+           :permission (or (some-> stored-permission explorer/normalize-permission-name)
                            (:permission explorer/default-ui-state)))))
 
 (defn- persist-ui!
@@ -661,7 +661,7 @@
   [permission]
   (update-ui! #(-> %
                    reset-navigation
-                   (assoc :permission permission)))
+                   (assoc :permission (explorer/normalize-permission-name permission))))
   (invalidate-child-sections!)
   (invalidate-counts!)
   (start-count-jobs!)
@@ -670,7 +670,9 @@
 (defn select-resource!
   [resource]
   (let [{:keys [permission-changed?]}
-        (update-ui! #(assoc % :selected-resource resource))]
+        (update-ui! #(assoc % :selected-resource
+                            (some-> resource
+                                    (update :type explorer/normalize-resource-type))))]
     (when permission-changed?
       (invalidate-child-sections!)
       (invalidate-counts!)

@@ -6,6 +6,14 @@
 (defonce root-el (atom nil))
 (defonce count-formatter (js/Intl.NumberFormat. "en-US"))
 
+(defn identifier-label
+  [value]
+  (explorer/identifier-label value))
+
+(defn- identifier-token
+  [value]
+  (or (identifier-label value) "unknown"))
+
 (defn- format-count
   [n]
   (.format count-formatter (long n)))
@@ -25,7 +33,7 @@
 
 (defn- type-class
   [resource-type]
-  (str "type-" (name resource-type)))
+  (str "type-" (identifier-token resource-type)))
 
 (defn- type-badge
   [resource-type]
@@ -35,10 +43,10 @@
   [expected actual]
   (= expected actual))
 
-(defn- permission-label
+(defn permission-label
   [permission]
-  (if permission
-    (str ":" (name permission))
+  (if-let [label (identifier-label permission)]
+    (str ":" label)
     "No permission"))
 
 (defn- selected-resource?
@@ -127,47 +135,48 @@
 
 (defn- render-child-group
   [selected-resource group]
-  [:div.relationship-group {:id (str "section-" (:section-key group))}
-   [:div.group-card__header
-    [:button.group-card__toggle
-     {:on-click #(app-state/toggle-expanded-section! (:section-key group))}
-     [:span.group-card__caret (if (:expanded? group) "▾" "▸")]
-     (type-badge (:resource-type group))
-     [:span.relationship-group__title (str (name (:resource-type group)) "s")]]
-    [:div.group-card__stats
-     [:span.relationship-group__count (section-count-text group)]]]
-   (when (:expanded? group)
-     [:div.group-card__body
-      [:div.group-card__meta
-       [:span.tree-meta__time (str "Page " (:page-number group))]
-       (when-let [error (:error group)]
-         [:span.tree-meta__error error])]
-      [:div.pagination-row
-      [:button.pagination-button
-        {:on-click #(app-state/nested-first-page! (:section-key group))
-         :disabled (or (not (:supported? group))
-                       (= 1 (:page-number group)))}
-        "First"]
-       [:button.pagination-button
-        {:on-click #(app-state/nested-prev-page! (:section-key group))
-         :disabled (or (not (:supported? group))
-                       (= 1 (:page-number group)))}
-        "Prev"]
-       [:button.pagination-button
-        {:on-click #(app-state/nested-next-page! (:section-key group) (:next-cursor group))
-         :disabled (or (not (:supported? group))
-                       (nil? (:next-cursor group)))}
-        "Next"]]
-      (if-let [error (:error group)]
-        [:div.error-block error]
-        (if-let [notice (:notice group)]
-          [:div.empty-state notice]
-          (if (seq (:items group))
-          [:div.relationship-group__items
-           (for [child (:items group)]
-             [:div {:key (explorer/resource-key child)}
-              (render-resource-node selected-resource child)])]
-          [:div.empty-state "No resources on this page."])))])])
+  (when-let [resource-type (some-> (:resource-type group) explorer/normalize-resource-type)]
+    [:div.relationship-group {:id (str "section-" (:section-key group))}
+     [:div.group-card__header
+      [:button.group-card__toggle
+       {:on-click #(app-state/toggle-expanded-section! (:section-key group))}
+       [:span.group-card__caret (if (:expanded? group) "▾" "▸")]
+       (type-badge resource-type)
+       [:span.relationship-group__title (str (identifier-token resource-type) "s")]]
+      [:div.group-card__stats
+       [:span.relationship-group__count (section-count-text group)]]]
+     (when (:expanded? group)
+       [:div.group-card__body
+        [:div.group-card__meta
+         [:span.tree-meta__time (str "Page " (:page-number group))]
+         (when-let [error (:error group)]
+           [:span.tree-meta__error error])]
+        [:div.pagination-row
+        [:button.pagination-button
+          {:on-click #(app-state/nested-first-page! (:section-key group))
+           :disabled (or (not (:supported? group))
+                         (= 1 (:page-number group)))}
+          "First"]
+         [:button.pagination-button
+          {:on-click #(app-state/nested-prev-page! (:section-key group))
+           :disabled (or (not (:supported? group))
+                         (= 1 (:page-number group)))}
+          "Prev"]
+         [:button.pagination-button
+          {:on-click #(app-state/nested-next-page! (:section-key group) (:next-cursor group))
+           :disabled (or (not (:supported? group))
+                         (nil? (:next-cursor group)))}
+          "Next"]]
+        (if-let [error (:error group)]
+          [:div.error-block error]
+          (if-let [notice (:notice group)]
+            [:div.empty-state notice]
+            (if (seq (:items group))
+            [:div.relationship-group__items
+             (for [child (:items group)]
+               [:div {:key (explorer/resource-key child)}
+                (render-resource-node selected-resource child)])]
+            [:div.empty-state "No resources on this page."])))])]))
 
 (defn- render-resource-children
   [selected-resource node]
@@ -205,160 +214,181 @@
 
 (defn- render-group
   [selected-resource group]
-  [:div.group-card {:id (str "resource-group-" (name (:resource-type group)))}
-   [:div.group-card__header
-    [:button.group-card__toggle
-     {:on-click #(app-state/toggle-group! (:resource-type group))}
-     [:span.group-card__caret (if (:expanded? group) "▾" "▸")]
-     (type-badge (:resource-type group))
-     [:span.group-card__title (str (name (:resource-type group)) "s")]]
-    [:div.group-card__stats
-     [:span.group-card__count (count-text group)]
+  (when-let [resource-type (some-> (:resource-type group) explorer/normalize-resource-type)]
+    [:div.group-card {:id (str "resource-group-" (identifier-token resource-type))}
+     [:div.group-card__header
+      [:button.group-card__toggle
+       {:on-click #(app-state/toggle-group! resource-type)}
+       [:span.group-card__caret (if (:expanded? group) "▾" "▸")]
+       (type-badge resource-type)
+       [:span.group-card__title (str (identifier-token resource-type) "s")]]
+      [:div.group-card__stats
+       [:span.group-card__count (count-text group)]
+       (when (:expanded? group)
+         [:span.group-card__range (range-text group)])]]
      (when (:expanded? group)
-       [:span.group-card__range (range-text group)])]]
-   (when (:expanded? group)
-     [:div.group-card__body
-      [:div.group-card__meta
-       [:span.tree-meta__time (str "Page " (:page-number group))]
-       (when-let [error (:error group)]
-         [:span.tree-meta__error error])]
-      [:div.pagination-row
-      [:button.pagination-button
-        {:on-click #(app-state/first-group-page! (:resource-type group))
-         :disabled (or (not (:supported? group))
-                       (= 1 (:page-number group)))}
-        "First"]
-       [:button.pagination-button
-        {:on-click #(app-state/prev-group-page! (:resource-type group))
-         :disabled (or (not (:supported? group))
-                       (= 1 (:page-number group)))}
-        "Prev"]
-       [:button.pagination-button
-        {:on-click #(app-state/next-group-page! (:resource-type group) (:next-cursor group))
-         :disabled (or (not (:supported? group))
-                       (nil? (:next-cursor group)))}
-        "Next"]]
-      (if-let [error (:error group)]
-        [:div.error-block error]
-        (if-let [notice (:notice group)]
-          [:div.empty-state notice]
-          (if (seq (:items group))
-          [:div.list-stack
-           (for [resource (:items group)]
-             [:div {:key (explorer/resource-key resource)}
-              (render-resource-node selected-resource resource)])]
-          [:div.empty-state "No resources on this page."])))])])
+       [:div.group-card__body
+        [:div.group-card__meta
+         [:span.tree-meta__time (str "Page " (:page-number group))]
+         (when-let [error (:error group)]
+           [:span.tree-meta__error error])]
+        [:div.pagination-row
+        [:button.pagination-button
+          {:on-click #(app-state/first-group-page! resource-type)
+           :disabled (or (not (:supported? group))
+                         (= 1 (:page-number group)))}
+          "First"]
+         [:button.pagination-button
+          {:on-click #(app-state/prev-group-page! resource-type)
+           :disabled (or (not (:supported? group))
+                         (= 1 (:page-number group)))}
+          "Prev"]
+         [:button.pagination-button
+          {:on-click #(app-state/next-group-page! resource-type (:next-cursor group))
+           :disabled (or (not (:supported? group))
+                         (nil? (:next-cursor group)))}
+          "Next"]]
+        (if-let [error (:error group)]
+          [:div.error-block error]
+          (if-let [notice (:notice group)]
+            [:div.empty-state notice]
+            (if (seq (:items group))
+            [:div.list-stack
+             (for [resource (:items group)]
+               [:div {:key (explorer/resource-key resource)}
+                (render-resource-node selected-resource resource)])]
+            [:div.empty-state "No resources on this page."])))])]))
 
 (defn- subject-panel
   [{:keys [current-subject permission permissions quick-subjects user-page]}]
-  [:div.panel-card
-   [:div.panel-heading
-    [:p.panel-kicker "Subjects"]]
-   [:div.active-summary.active-summary--subject
-    [:span.active-summary__label "Active subject"]
-    [:span.active-summary__value current-subject]]
-   [:div.panel-section
-    [:p.panel-label "Permission"]
-    (if (seq permissions)
-      [:div.chip-row
-       (for [perm permissions]
-         [:button.chip
-          {:key      (name perm)
-           :class    (when (active? perm permission) "chip--active")
-           :on-click #(app-state/select-permission! perm)}
-          (name perm)])]
-      [:div.empty-state "No permissions defined in the current schema."])]
-   [:div.panel-section
-    [:p.panel-label "Quick Subjects"]
-    [:div.button-stack.button-stack--inline
-     (for [{:keys [id label]} quick-subjects]
-       [:button.subject-button
-        {:key      id
-         :class    (when (active? id current-subject) "subject-button--active")
-         :on-click #(app-state/select-subject! id)}
-        label])]]
-   [:div.panel-section
-    [:div.section-header
-     [:div
-      [:p.panel-label "Known Users"]
-      [:p.section-meta
-       (pagination-summary (:page-start user-page)
-         (:page-end user-page)
-         (:total user-page)
-         (:time user-page))]]]
-    [:div.pagination-row
-     [:button.pagination-button
-      {:disabled (not (:has-prev? user-page))
-       :on-click #(app-state/set-user-page! (dec (:page user-page)))}
-      "Prev"]
-     [:button.pagination-button
-      {:disabled (not (:has-next? user-page))
-       :on-click #(app-state/set-user-page! (inc (:page user-page)))}
-      "Next"]]
-    (if (seq (:items user-page))
-      [:div.list-stack
-       (for [user-id (:items user-page)]
-         [:button.list-item
-          {:key      user-id
-           :class    (when (active? user-id current-subject) "list-item--active")
-           :on-click #(app-state/select-subject! user-id)}
-          (type-badge :user)
-          [:span.list-item__text user-id]])]
-      [:div.empty-state "No known users yet."])]])
+  (let [permissions' (->> permissions
+                          (keep explorer/normalize-permission-name)
+                          distinct
+                          vec)]
+    [:div.panel-card
+     [:div.panel-heading
+      [:p.panel-kicker "Subjects"]]
+     [:div.active-summary.active-summary--subject
+      [:span.active-summary__label "Active subject"]
+      [:span.active-summary__value current-subject]]
+     [:div.panel-section
+      [:p.panel-label "Permission"]
+      (if (seq permissions')
+        [:div.chip-row
+         (map-indexed
+          (fn [idx perm]
+            [:button.chip
+             {:key      (str "permission-" (identifier-token perm) "-" idx)
+              :class    (when (active? perm permission) "chip--active")
+              :on-click #(app-state/select-permission! perm)}
+             (identifier-token perm)])
+          permissions')]
+        [:div.empty-state "No permissions defined in the current schema."])]
+     [:div.panel-section
+      [:p.panel-label "Quick Subjects"]
+      [:div.button-stack.button-stack--inline
+       (for [{:keys [id label]} quick-subjects]
+         [:button.subject-button
+          {:key      id
+           :class    (when (active? id current-subject) "subject-button--active")
+           :on-click #(app-state/select-subject! id)}
+          label])]]
+     [:div.panel-section
+      [:div.section-header
+       [:div
+        [:p.panel-label "Known Users"]
+        [:p.section-meta
+         (pagination-summary (:page-start user-page)
+           (:page-end user-page)
+           (:total user-page)
+           (:time user-page))]]]
+      [:div.pagination-row
+       [:button.pagination-button
+        {:disabled (not (:has-prev? user-page))
+         :on-click #(app-state/set-user-page! (dec (:page user-page)))}
+        "Prev"]
+       [:button.pagination-button
+        {:disabled (not (:has-next? user-page))
+         :on-click #(app-state/set-user-page! (inc (:page user-page)))}
+        "Next"]]
+      (if (seq (:items user-page))
+        [:div.list-stack
+         (for [user-id (:items user-page)]
+           [:button.list-item
+            {:key      user-id
+             :class    (when (active? user-id current-subject) "list-item--active")
+             :on-click #(app-state/select-subject! user-id)}
+            (type-badge :user)
+            [:span.list-item__text user-id]])]
+        [:div.empty-state "No known users yet."])]]))
 
 (defn- resource-panel
   [{:keys [groups selected-resource subject-id permission]}]
-  [:div.panel-card
-   [:div.panel-heading
-    [:p.panel-kicker "Resources"]]
-   [:div.panel-summary
-    [:span.panel-summary__value subject-id]
-    [:span.panel-summary__separator "·"]
-    [:span.panel-summary__value (permission-label permission)]]
-   (for [group groups]
-     [:div {:key (name (:resource-type group))}
-      (render-group selected-resource group)])])
+  (let [groups' (->> groups
+                     (keep (fn [group]
+                             (when-let [resource-type (some-> (:resource-type group)
+                                                              explorer/normalize-resource-type)]
+                               (assoc group :resource-type resource-type))))
+                     vec)]
+    [:div.panel-card
+     [:div.panel-heading
+      [:p.panel-kicker "Resources"]]
+     [:div.panel-summary
+      [:span.panel-summary__value subject-id]
+      [:span.panel-summary__separator "·"]
+      [:span.panel-summary__value (permission-label permission)]]
+     (for [group groups']
+       [:div {:key (identifier-token (:resource-type group))}
+        (render-group selected-resource group)])]))
 
 (defn- detail-panel
   [{:keys [resource current-subject permissions error]}]
   (if-not resource
     (loading-panel "Detail" "Select a resource to inspect.")
-    [:div.panel-card
-     [:div.panel-heading
-      [:p.panel-kicker "Detail"]]
-     [:div.panel-section
-      [:div.detail-header
-       (type-badge (:type resource))
-       [:div
-        [:p.detail-header__title (name (:type resource))]
-        [:p.detail-header__subtitle (or (:display-name resource) (:id resource))]
-        (when (and (:display-name resource)
-                   (not= (:display-name resource) (:id resource)))
-          [:p.detail-header__id (:id resource)])]]]
-     (if error
-       [:div.error-block error]
-       (if (seq permissions)
-         (for [{:keys [permission subjects time error]} permissions]
-           [:div.panel-section {:key (name permission)}
-            [:div.section-header
-             [:div
-              [:p.panel-label (str ":" (name permission))]
-              [:p.section-meta (str (count subjects) " subjects")]]
-             (when time
-               [:div.pagination-hint (explorer/human-duration time)])]
-            (if error
-              [:div.error-block error]
-              (if (seq subjects)
-                [:div.list-stack
-                 (for [{:keys [type id]} subjects]
-                   [:button.list-item
-                    {:key      id
-                     :class    (when (active? id current-subject) "list-item--active")
-                     :on-click #(app-state/select-subject! id)}
-                    (type-badge type)
-                    [:span.list-item__text id]])]
-                [:div.empty-state "No subjects found for this permission."]))])
-         [:div.empty-state "No permissions defined for this resource type."]))]))
+    (let [resource-type      (some-> (:type resource) explorer/normalize-resource-type)
+          permissions'       (->> permissions
+                                  (keep (fn [{:keys [permission] :as entry}]
+                                          (when-let [permission' (explorer/normalize-permission-name permission)]
+                                            (assoc entry :permission permission'))))
+                                  vec)]
+      [:div.panel-card
+       [:div.panel-heading
+        [:p.panel-kicker "Detail"]]
+       [:div.panel-section
+        [:div.detail-header
+         (type-badge resource-type)
+         [:div
+          [:p.detail-header__title (identifier-token resource-type)]
+          [:p.detail-header__subtitle (or (:display-name resource) (:id resource))]
+          (when (and (:display-name resource)
+                     (not= (:display-name resource) (:id resource)))
+            [:p.detail-header__id (:id resource)])]]]
+       (if error
+         [:div.error-block error]
+         (if (seq permissions')
+           (map-indexed
+            (fn [idx {:keys [permission subjects time error]}]
+              [:div.panel-section {:key (str "detail-permission-" (identifier-token permission) "-" idx)}
+               [:div.section-header
+                [:div
+                 [:p.panel-label (permission-label permission)]
+                 [:p.section-meta (str (count subjects) " subjects")]]
+                (when time
+                  [:div.pagination-hint (explorer/human-duration time)])]
+               (if error
+                 [:div.error-block error]
+                 (if (seq subjects)
+                   [:div.list-stack
+                    (for [{:keys [type id]} subjects]
+                      [:button.list-item
+                       {:key      id
+                        :class    (when (active? id current-subject) "list-item--active")
+                        :on-click #(app-state/select-subject! id)}
+                       (type-badge type)
+                       [:span.list-item__text id]])]
+                   [:div.empty-state "No subjects found for this permission."]))])
+            permissions')
+           [:div.empty-state "No permissions defined for this resource type."]))])))
 
 (defn- render-schema-graph!
   [panel-data]
@@ -535,8 +565,10 @@
   (let [db            (app-state/db)
         acl           (app-state/client)
         subject-id    (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission    (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
-        selected-resource (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
+        permission    (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+                              explorer/normalize-permission-name)
+        selected-resource (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
+                                  (update :type explorer/normalize-resource-type))
         user-page     (rum/react (rum/cursor-in app-state/!app [:ui :user-page]))
         db-rev        (rum/react (rum/cursor-in app-state/!app [:db-rev]))
         view-state    (assoc (subject-view-state subject-id permission user-page db-rev)
@@ -556,7 +588,8 @@
   (let [db                     (app-state/db)
         acl                    (app-state/client)
         subject-id             (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission             (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+        permission             (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+                                       explorer/normalize-permission-name)
         group-expanded         (rum/react (rum/cursor-in app-state/!app [:ui :group-expanded]))
         group-cursors          (rum/react (rum/cursor-in app-state/!app [:ui :group-prev resource-type]))
         expanded-resource-keys (rum/react (rum/cursor-in app-state/!app [:ui :expanded-resource-keys]))
@@ -564,7 +597,8 @@
         nested-prev            (rum/react (rum/cursor-in app-state/!app [:ui :nested-prev]))
         count-entry            (rum/react (rum/cursor-in app-state/!app [:counts resource-type]))
         child-sections         (rum/react (rum/cursor-in app-state/!app [:child-sections]))
-        selected-resource      (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
+        selected-resource      (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
+                                       (update :type explorer/normalize-resource-type))
         db-rev                 (rum/react (rum/cursor-in app-state/!app [:db-rev]))
         view-state             (group-view-state resource-type
                                  subject-id
@@ -583,21 +617,23 @@
 (rum/defcs resource-panel-view < rum/reactive
   [rum-state]
   (let [subject-id      (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission      (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+        permission      (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+                                explorer/normalize-permission-name)
         db-rev          (rum/react (rum/cursor-in app-state/!app [:db-rev]))
-        resource-types  (explorer/query-resource-types (app-state/db) (app-state/client))]
+        resource-types  (->> (explorer/query-resource-types (app-state/db) (app-state/client))
+                             (keep explorer/normalize-resource-type)
+                             distinct
+                             vec)]
     [:div.panel-card
      [:div.panel-heading
       [:p.panel-kicker "Resources"]]
      [:div.panel-summary
       [:span.panel-summary__value subject-id]
       [:span.panel-summary__separator "·"]
-      [:span.panel-summary__value (if permission
-                                    (str ":" (name permission))
-                                    "No active permission")]]
+      [:span.panel-summary__value (permission-label permission)]]
      (if (seq resource-types)
        (for [resource-type resource-types]
-         [:div {:key (str (name resource-type) "-" db-rev)}
+         [:div {:key (str (identifier-token resource-type) "-" db-rev)}
           (resource-group-view resource-type)])
        [:div.empty-state "No queryable resource types in the current schema."])]))
 
@@ -606,8 +642,10 @@
   (let [db                (app-state/db)
         acl               (app-state/client)
         subject-id        (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission        (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
-        selected-resource (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
+        permission        (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
+                                  explorer/normalize-permission-name)
+        selected-resource (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
+                                  (update :type explorer/normalize-resource-type))
         db-rev            (rum/react (rum/cursor-in app-state/!app [:db-rev]))
         detail-data       (assoc (explorer/resource-detail-data db acl
                                    (detail-view-state subject-id permission selected-resource db-rev))

@@ -5,12 +5,18 @@
  {:target :browser
    :devtools {:preloads [shadow.cljs.devtools.client.browser]}
    :output-dir "resources/public/js"
-   :asset-path "/js"
+   :asset-path "js"
    :modules {:app {:init-fn eacl.explorer.core/init!}}}
 
   :test
   {:target :browser
    :devtools {:preloads [shadow.cljs.devtools.client.browser]}
    :output-dir "resources/public/test/js"
-   :asset-path "/test/js"
-   :modules {:test {:init-fn eacl.explorer.test-runner/init!}}}}}
+   :asset-path "js"
+   :modules {:test {:init-fn eacl.explorer.test-runner/init!}}}
+
+  :pages
+  {:target :browser
+   :output-dir "dist/js"
+   :asset-path "js"
+   :modules {:app {:init-fn eacl.explorer.core/init!}}}}}

@@ -20,6 +20,81 @@
 (def user-page-size 20)
 (def max-expansion-depth 4)
 
+(defn normalize-identifier
+  [value]
+  (cond
+    (nil? value)
+    nil
+
+    (string? value)
+    (some-> value str/trim not-empty keyword)
+
+    :else
+    (try
+      (some-> value name keyword)
+      (catch :default _
+        nil))))
+
+(defn normalize-resource-type
+  [value]
+  (normalize-identifier value))
+
+(defn normalize-permission-name
+  [value]
+  (normalize-identifier value))
+
+(defn identifier-label
+  [value]
+  (cond
+    (nil? value)
+    nil
+
+    (string? value)
+    (some-> value str/trim not-empty)
+
+    :else
+    (or (try
+          (some-> value name not-empty)
+          (catch :default _
+            nil))
+        (str value))))
+
+(defn- identifier-token
+  [value]
+  (or (identifier-label value) "unknown"))
+
+(declare resource-type-sort-key)
+(declare permission-sort-key)
+
+(defn- canonical-resource-types
+  [resource-types]
+  (->> resource-types
+       (keep normalize-resource-type)
+       distinct
+       (sort-by resource-type-sort-key)
+       vec))
+
+(defn permission-names->ui
+  [permission-names]
+  (->> permission-names
+       (keep normalize-permission-name)
+       distinct
+       (sort-by permission-sort-key)
+       vec))
+
+(defn permissions-by-type->ui
+  [permissions-by-type]
+  (->> permissions-by-type
+       (reduce-kv (fn [acc resource-type permission-names]
+                    (if-let [resource-type' (normalize-resource-type resource-type)]
+                      (update acc resource-type' (fnil into []) (permission-names->ui permission-names))
+                      acc))
+                  {})
+       (map (fn [[resource-type permission-names]]
+              [resource-type
+               (permission-names->ui permission-names)]))
+       (into {})))
+
 (def default-ui-state
   {:subject-id             "user-1"
    :permission             :view
@@ -49,8 +124,9 @@
 
 (defn- resource-type-sort-key
   [resource-type]
-  [(get resource-type-order resource-type 99)
-   (name resource-type)])
+  (let [resource-type' (normalize-resource-type resource-type)]
+    [(get resource-type-order resource-type' 99)
+     (or (identifier-label resource-type) "")]))
 
 (defn now-nanos
   []
@@ -72,12 +148,13 @@
   [state]
   (some-> (or (get-in state [:ui :permission])
               (:permission state))
-          keyword))
+          normalize-permission-name))
 
 (defn selected-resource
   [state]
-  (or (get-in state [:ui :selected-resource])
-      (:selected-resource state)))
+  (some-> (or (get-in state [:ui :selected-resource])
+              (:selected-resource state))
+          (update :type normalize-resource-type)))
 
 (defn group-expanded?
   [state resource-type]
@@ -102,7 +179,7 @@
 
 (defn resource-key
   [{:keys [type id]}]
-  (str (name type) "|" id))
+  (str (or (identifier-label type) "unknown") "|" id))
 
 (defn parse-resource-key
   [key']
@@ -119,7 +196,7 @@
 
 (defn child-group-key
   [parent resource-type]
-  (str (resource-key parent) ">" (name resource-type)))
+  (str (resource-key parent) ">" (identifier-token resource-type)))
 
 (defn section-expanded?
   [state section-key]
@@ -162,20 +239,39 @@
 
 (defn- permission-sort-key
   [permission]
-  [(case permission
+  [(case (normalize-permission-name permission)
      :view 0
      :admin 1
      50)
-   (name permission)])
+   (or (identifier-label permission) "")])
 
 (defn- resource-sort-key
   [resource]
-  [(get resource-type-order (:type resource) 99)
+  [(get resource-type-order (normalize-resource-type (:type resource)) 99)
    (or (:display-name resource) (:id resource))])
 
 (defn- schema-data
   [acl]
   (eacl/read-schema acl))
+
+(defn- schema-permissions
+  [acl]
+  (vec (or (:permissions (schema-data acl)) [])))
+
+(defn- schema-resource-types
+  [acl]
+  (canonical-resource-types
+   (map :eacl.permission/resource-type (schema-permissions acl))))
+
+(defn- schema-permissions-by-type
+  [acl]
+  (permissions-by-type->ui
+   (->> (schema-permissions acl)
+        (group-by :eacl.permission/resource-type)
+        (map (fn [[resource-type perms]]
+               [resource-type
+                (map :eacl.permission/permission-name perms)]))
+        (into {}))))
 
 (defn- permissions-by-type-from-db
   [db]
@@ -191,57 +287,51 @@
                  (->> rows
                       (map second)
                       distinct
-                      (sort-by permission-sort-key)
                       vec)]))
          (into {}))))
 
 (defn- resource-types-from-db
   [db]
   (when db
-    (->> (d/q '[:find [?resource-type ...]
-                :where
-                [_ :eacl.permission/resource-type ?resource-type]]
-              db)
-         distinct
-         (sort-by resource-type-sort-key)
-         vec)))
+    (let [resource-types (d/q '[:find [?resource-type ...]
+                                :where
+                                [_ :eacl.permission/resource-type ?resource-type]]
+                              db)]
+      (->> resource-types
+           distinct
+           (sort-by resource-type-sort-key)
+           vec))))
 
 (defn query-resource-types
   ([acl]
    (query-resource-types nil acl))
   ([db acl]
    (cond
-     (some? db)
-     (or (resource-types-from-db db)
-         default-resource-types)
+     acl
+     (schema-resource-types acl)
 
-     (not acl)
-    default-resource-types
+     (some? db)
+     (let [resource-types (canonical-resource-types (resource-types-from-db db))]
+       (if (seq resource-types)
+         resource-types
+         default-resource-types))
 
      :else
-     (let [{:keys [permissions]} (schema-data acl)]
-       (->> (map :eacl.permission/resource-type permissions)
-            (remove nil?)
-            distinct
-            (sort-by resource-type-sort-key)
-            vec)))))
+     default-resource-types)))
 
 (defn permissions-by-type
   ([acl]
    (permissions-by-type nil acl))
   ([db acl]
-   (or (permissions-by-type-from-db db)
-       (let [{:keys [permissions]} (schema-data acl)]
-         (->> permissions
-              (group-by :eacl.permission/resource-type)
-              (map (fn [[resource-type perms]]
-                     [resource-type
-                      (->> perms
-                           (map :eacl.permission/permission-name)
-                           distinct
-                           (sort-by permission-sort-key)
-                           vec)]))
-              (into {}))))))
+   (cond
+     acl
+     (schema-permissions-by-type acl)
+
+     (some? db)
+     (permissions-by-type->ui (or (permissions-by-type-from-db db) {}))
+
+     :else
+     {})))
 
 (defn- available-permissions-from-schema
   [db acl]
@@ -260,7 +350,9 @@
 
 (defn- permissions-for-resource-from-schema
   [db acl resource-type]
-  (vec (get (permissions-by-type db acl) resource-type [])))
+  (vec (get (permissions-by-type db acl)
+            (normalize-resource-type resource-type)
+            [])))
 
 (defn permissions-for-resource
   ([acl resource-type]
@@ -270,16 +362,22 @@
 
 (defn selectable-permissions
   [db acl state]
-  (if-let [resource-type (some-> (selected-resource state) :type)]
-    (permissions-for-resource-from-schema db acl resource-type)
-    (available-permissions-from-schema db acl)))
+  (if-let [resource (selected-resource state)]
+    (if-let [resource-type (:type resource)]
+      (permission-names->ui (permissions-for-resource-from-schema db acl resource-type))
+      [])
+    (permission-names->ui (available-permissions-from-schema db acl))))
 
 (defn permission-available?
   ([acl resource-type permission]
    (permission-available? nil acl resource-type permission))
   ([db acl resource-type permission]
-  (and permission
-       (contains? (set (permissions-for-resource-from-schema db acl resource-type)) permission))))
+  (let [resource-type' (normalize-resource-type resource-type)
+        permission'    (normalize-permission-name permission)]
+    (and resource-type'
+         permission'
+         (contains? (set (permissions-for-resource-from-schema db acl resource-type'))
+                    permission')))))
 
 (defn relations-by-parent
   [acl]
@@ -487,7 +585,8 @@
 (defn- permission-notice
   [permission resource-type]
   (if permission
-    (str ":" (name permission) " is not defined for " (name resource-type) ".")
+    (str ":" (identifier-token permission) " is not defined for "
+         (identifier-token resource-type) ".")
     "No permissions are defined in the current schema."))
 
 (defn top-level-group-data

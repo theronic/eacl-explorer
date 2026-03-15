@@ -4,8 +4,12 @@
   datascript/datascript     {:mvn/version "1.7.8"}
 
   ;; Authorization
-  cloudafrica/eacl            {:local/root "/Users/petrus/.codex/worktrees/e264/eacl/modules/eacl"}
-  cloudafrica/eacl-datascript {:local/root "/Users/petrus/.codex/worktrees/e264/eacl/modules/eacl-datascript"}}
+  eacl/eacl                 {:git/url "https://github.com/theronic/eacl.git"
+                             :git/sha "c6b94ad1e54fc87cc4058394deedd8140dfff22d"
+                             :deps/root "modules/eacl"}
+  eacl/eacl-datascript      {:git/url "https://github.com/theronic/eacl.git"
+                             :git/sha "c6b94ad1e54fc87cc4058394deedd8140dfff22d"
+                             :deps/root "modules/eacl-datascript"}} 
 
  :paths ["src" "resources"]
 

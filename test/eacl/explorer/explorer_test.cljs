@@ -325,6 +325,70 @@
       (is (= [:view :admin :operate] selected-perms))
       (is (some #{:operate} all-perms)))))
 
+(deftest normalize-identifier-coerces-keyword-like-values
+  (is (= :server (explorer/normalize-resource-type :server)))
+  (is (= :server (explorer/normalize-resource-type 'server)))
+  (is (= :server (explorer/normalize-resource-type "server")))
+  (is (nil? (explorer/normalize-resource-type nil)))
+  (is (nil? (explorer/normalize-resource-type "")))
+  (is (= :view (explorer/normalize-permission-name :view)))
+  (is (= :view (explorer/normalize-permission-name 'view)))
+  (is (= :view (explorer/normalize-permission-name "view")))
+  (is (nil? (explorer/normalize-permission-name nil))))
+
+(deftest query-helpers-normalize-ui-facing-identifiers
+  (with-redefs [explorer/resource-types-from-db (fn [_]
+                                                  [:server "team" 'account nil ""])
+                explorer/schema-data (fn [_]
+                                       {:permissions [{:eacl.permission/resource-type :server
+                                                       :eacl.permission/permission-name "view"}
+                                                      {:eacl.permission/resource-type "server"
+                                                       :eacl.permission/permission-name 'admin}
+                                                      {:eacl.permission/resource-type 'account
+                                                       :eacl.permission/permission-name :view}
+                                                      {:eacl.permission/resource-type 'team
+                                                       :eacl.permission/permission-name nil}
+                                                      {:eacl.permission/resource-type nil
+                                                       :eacl.permission/permission-name :admin}]})]
+    (is (= [:account :team :server]
+           (explorer/query-resource-types :db :acl)))
+    (is (= {:account [:view]
+            :server  [:view :admin]
+            :team    []}
+           (explorer/permissions-by-type nil :acl)))
+    (is (= [:view :admin]
+           (explorer/selectable-permissions nil :acl {:ui {}})))
+    (is (= [:view :admin]
+           (explorer/selectable-permissions nil :acl
+                                            {:ui {:selected-resource {:type "server"
+                                                                      :id   "server-1"}}})))
+    (is (= []
+           (explorer/selectable-permissions nil :acl
+                                            {:ui {:selected-resource {:type nil
+                                                                      :id   "server-1"}}})))))
+
+(deftest schema-metadata-falls-back-to-authoritative-client-view
+  (with-redefs [explorer/resource-types-from-db (fn [_] [])
+                explorer/permissions-by-type-from-db (fn [_] {})
+                explorer/schema-data (fn [_]
+                                       {:permissions [{:eacl.permission/resource-type :server
+                                                       :eacl.permission/permission-name :view}
+                                                      {:eacl.permission/resource-type :server
+                                                       :eacl.permission/permission-name :admin}
+                                                      {:eacl.permission/resource-type :team
+                                                       :eacl.permission/permission-name :view}]})]
+    (is (= [:team :server]
+           (explorer/query-resource-types :db :acl)))
+    (is (= {:server [:view :admin]
+            :team   [:view]}
+           (explorer/permissions-by-type :db :acl)))
+    (is (= [:view :admin]
+           (explorer/selectable-permissions :db :acl
+                                            {:ui {:selected-resource {:type :server
+                                                                      :id   "server-1"}}})))
+    (is (= [:view :admin]
+           (explorer/selectable-permissions :db :acl {:ui {}})))))
+
 (deftest invalid-schema-reports-missing-permission-reference
   (let [{:keys [client]} (seed/create-runtime)
         invalid-schema
