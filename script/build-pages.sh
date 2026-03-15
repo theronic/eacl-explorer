@@ -11,3 +11,7 @@ mkdir -p dist
 clojure -M:dev -m shadow.cljs.devtools.cli release pages
 
 find resources/public -mindepth 1 -maxdepth 1 ! -name test -exec cp -R {} dist/ \;
+
+if [[ -f CNAME ]]; then
+  cp CNAME dist/CNAME
+fi
