@@ -517,8 +517,23 @@
   [db acl]
   (->> (concat
         (when acl
-          (map (comp :id :subject)
-               (eacl/read-relationships acl {:subject/type :user})))
+          (loop [cursor-token nil
+                 seen-cursors #{}
+                 relationships []]
+            (let [{:keys [data cursor]}
+                  (eacl/read-relationships acl
+                                           (cond-> {:subject/type :user
+                                                    :limit        1000}
+                                             cursor-token (assoc :cursor cursor-token)))
+                  relationships' (into relationships data)
+                  repeated?      (or (nil? cursor)
+                                     (contains? seen-cursors cursor))]
+              (if (and (= 1000 (count data))
+                       (not repeated?))
+                (recur cursor
+                       (conj seen-cursors cursor)
+                       relationships')
+                (map (comp :id :subject) relationships')))))
         (keep (fn [{:keys [id]}]
                 (when (d/entid db [:eacl/id id])
                   id))

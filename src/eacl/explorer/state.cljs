@@ -360,13 +360,13 @@
 
 (defn- read-child-relationships
   [acl parent resource-type relation-name cursor-token limit]
-  (vec (eacl/read-relationships acl
-                                {:subject/type      (:type parent)
-                                 :subject/id        (:id parent)
-                                 :resource/type     resource-type
-                                 :resource/relation relation-name
-                                 :cursor            cursor-token
-                                 :limit             limit})))
+  (eacl/read-relationships acl
+                           {:subject/type      (:type parent)
+                            :subject/id        (:id parent)
+                            :resource/type     resource-type
+                            :resource/relation relation-name
+                            :cursor            cursor-token
+                            :limit             limit}))
 
 (defn- resource-authorized?
   [acl subject permission permission-implied? resource]
@@ -395,14 +395,17 @@
     (letfn [(step [cursor-token total]
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
-                  (let [relationships  (read-child-relationships acl
-                                                                 parent
-                                                                 resource-type
-                                                                 relation-name
-                                                                 cursor-token
-                                                                 child-section-count-batch-size)
-                        more-batches? (= child-section-count-batch-size (count relationships))
-                        next-cursor   (some-> relationships last :resource :id)
+                  (let [{relationships :data
+                         next-cursor   :cursor}
+                        (read-child-relationships acl
+                                                  parent
+                                                  resource-type
+                                                  relation-name
+                                                  cursor-token
+                                                  child-section-count-batch-size)
+                        more-batches? (and (= child-section-count-batch-size (count relationships))
+                                           (some? next-cursor)
+                                           (not= next-cursor cursor-token))
                         total'        (+ total
                                          (if permission-implied?
                                            (count relationships)
@@ -464,14 +467,17 @@
             (step [cursor-token page-items]
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
-                  (let [relationships    (read-child-relationships acl
-                                                                   parent
-                                                                   resource-type
-                                                                   relation-name
-                                                                   cursor-token
-                                                                   child-section-batch-size)
-                        more-batches?    (= child-section-batch-size (count relationships))
-                        next-batch-cursor (some-> relationships last :resource :id)
+                  (let [{relationships    :data
+                         next-batch-cursor :cursor}
+                        (read-child-relationships acl
+                                                  parent
+                                                  resource-type
+                                                  relation-name
+                                                  cursor-token
+                                                  child-section-batch-size)
+                        more-batches?    (and (= child-section-batch-size (count relationships))
+                                              (some? next-batch-cursor)
+                                              (not= next-batch-cursor cursor-token))
                         {:keys [page-items has-next?]}
                         (collect-page-items acl
                                             subject
@@ -512,13 +518,15 @@
               (when (same-child-job-context? @!app section-key job-id context)
                 (if-let [relation-def (first remaining-defs)]
                   (try
-                    (let [relationships (vec (eacl/read-relationships acl
-                                                                       {:subject/type      (:type parent)
-                                                                        :subject/id        (:id parent)
-                                                                        :resource/type     resource-type
-                                                                        :resource/relation (:eacl.relation/relation-name relation-def)
-                                                                        :cursor            cursor-token
-                                                                        :limit             child-section-batch-size}))
+                    (let [{relationships   :data
+                           next-cursor-token :cursor}
+                          (eacl/read-relationships acl
+                                                   {:subject/type      (:type parent)
+                                                    :subject/id        (:id parent)
+                                                    :resource/type     resource-type
+                                                    :resource/relation (:eacl.relation/relation-name relation-def)
+                                                    :cursor            cursor-token
+                                                    :limit             child-section-batch-size})
                           resources      (map :resource relationships)
                           [seen' authorized']
                           (reduce (fn [[seen-resources authorized-resources] resource]
@@ -532,11 +540,12 @@
                                            authorized-resources]))))
                                   [seen authorized]
                                   resources)
-                          last-resource-id (some-> relationships last :resource :id)
-                          more?            (= child-section-batch-size (count relationships))]
+                          more?            (and (= child-section-batch-size (count relationships))
+                                                (some? next-cursor-token)
+                                                (not= next-cursor-token cursor-token))]
                       (js/setTimeout
                        #(step (if more? remaining-defs (next remaining-defs))
-                              (when more? last-resource-id)
+                              (when more? next-cursor-token)
                               seen'
                               authorized')
                        0))

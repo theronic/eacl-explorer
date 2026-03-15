@@ -110,12 +110,12 @@
             account        {:type :account :id "account-0001"}
             section-key    (explorer/child-group-key account :server)
             page-items     (explorer/hydrate-resources db
-                                                       (->> (eacl/read-relationships client
-                                                                                     {:subject/type      :account
-                                                                                      :subject/id        "account-0001"
-                                                                                      :resource/type     :server
-                                                                                      :resource/relation :account
-                                                                                      :limit             20})
+                                                       (->> (:data (eacl/read-relationships client
+                                                                                            {:subject/type      :account
+                                                                                             :subject/id        "account-0001"
+                                                                                             :resource/type     :server
+                                                                                             :resource/relation :account
+                                                                                             :limit             20}))
                                                             (map :resource)
                                                             (filter #(eacl/can? client (seed/->user "user-1") :view %))
                                                             vec))
@@ -151,12 +151,12 @@
             account        {:type :account :id "account-0001"}
             section-key    (explorer/child-group-key account :server)
             page-items     (explorer/hydrate-resources db
-                                                       (->> (eacl/read-relationships client
-                                                                                     {:subject/type      :account
-                                                                                      :subject/id        "account-0001"
-                                                                                      :resource/type     :server
-                                                                                      :resource/relation :account
-                                                                                      :limit             20})
+                                                       (->> (:data (eacl/read-relationships client
+                                                                                            {:subject/type      :account
+                                                                                             :subject/id        "account-0001"
+                                                                                             :resource/type     :server
+                                                                                             :resource/relation :account
+                                                                                             :limit             20}))
                                                             (map :resource)
                                                             vec))
             panel          (explorer/resource-panel-data db client

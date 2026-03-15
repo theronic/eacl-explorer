@@ -67,12 +67,12 @@
       (is (= seed/empty-totals (seed/current-totals db)))
       (is (= 1 (:seed/next-account-n seed-state)))
       (is (= 0 (:seed/seed-runs seed-state)))
-      (is (= 1 (count (eacl/read-relationships client
-                        {:subject/type      :user
-                         :subject/id        "super-user"
-                         :resource/type     :platform
-                         :resource/id       "platform"
-                         :resource/relation :super_admin}))))
+      (is (= 1 (count (:data (eacl/read-relationships client
+                               {:subject/type      :user
+                                :subject/id        "super-user"
+                                :resource/type     :platform
+                                :resource/id       "platform"
+                                :resource/relation :super_admin})))))
       (is (zero? (or (d/q '[:find (count ?server) .
                             :where
                             [?server :server/name _]]
@@ -92,26 +92,28 @@
 (deftest read-relationships-honors-limit-and-cursor-for-anchored-queries
   (support/with-test-runtime* :smoke
     (fn [{:keys [client]}]
-      (let [page-1    (vec (eacl/read-relationships client
-                                                    {:subject/type      :account
-                                                     :subject/id        "account-0001"
-                                                     :resource/type     :team
-                                                     :resource/relation :account
-                                                     :limit             2}))
-            cursor    (some-> page-1 last :resource :id)
-            page-2    (vec (eacl/read-relationships client
-                                                    {:subject/type      :account
-                                                     :subject/id        "account-0001"
-                                                     :resource/type     :team
-                                                     :resource/relation :account
-                                                     :cursor            cursor
-                                                     :limit             2}))
+      (let [{page-1 :data cursor :cursor}
+            (eacl/read-relationships client
+                                     {:subject/type      :account
+                                      :subject/id        "account-0001"
+                                      :resource/type     :team
+                                      :resource/relation :account
+                                      :limit             2})
+            {page-2 :data}
+            (eacl/read-relationships client
+                                     {:subject/type      :account
+                                      :subject/id        "account-0001"
+                                      :resource/type     :team
+                                      :resource/relation :account
+                                      :cursor            cursor
+                                      :limit             2})
             page-1-ids (mapv (comp :id :resource) page-1)
             page-2-ids (mapv (comp :id :resource) page-2)]
         (is (= 2 (count page-1)))
         (is (= 1 (count page-2)))
         (is (= ["team-0001-01" "team-0001-02"] page-1-ids))
-        (is (= ["team-0001-03"] page-2-ids))))))
+        (is (= ["team-0001-03"] page-2-ids))
+        (is (string? cursor))))))
 
 (deftest seed-more-plan-appends-servers-and-advances-account-counters
   (let [{:keys [conn client]} (seed/create-runtime)]
