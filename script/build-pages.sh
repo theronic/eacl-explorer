@@ -10,6 +10,4 @@ mkdir -p dist
 
 clojure -M:dev -m shadow.cljs.devtools.cli release pages
 
-cp resources/public/index.html dist/index.html
-cp resources/public/index.css dist/index.css
-cp resources/public/graph.js dist/graph.js
+find resources/public -mindepth 1 -maxdepth 1 ! -name test -exec cp -R {} dist/ \;
