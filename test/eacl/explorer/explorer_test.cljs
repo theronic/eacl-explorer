@@ -57,6 +57,18 @@
       (is (< (.indexOf items "shared-admin-0001-01")
              (.indexOf items "leader-0001-01"))))))
 
+(deftest known-user-directory-reads-relationships-from-client
+  (let [{:keys [conn client]} (seed/create-runtime)]
+    (seed/install-foundation! conn client)
+    (doseq [batch (:batches (seed/seed-more-plan (d/db conn) 4500))]
+      (seed/execute-batch! conn client batch))
+    (with-redefs [d/q (fn [& _]
+                        (throw (js/Error. "paged-known-users should not use datascript.core/q")))]
+      (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
+        (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
+        (is (some #{"owner-0001"} items))
+        (is (some #{"shared-admin-0001-01"} items))))))
+
 (deftest resource-columns-render-against-foundation-only-runtime
   (let [{:keys [conn client]} (seed/create-runtime)]
     (seed/install-foundation! conn client)

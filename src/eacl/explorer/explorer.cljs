@@ -514,28 +514,25 @@
        sort-resources))
 
 (defn- known-user-id-stream
-  [db]
+  [db acl]
   (->> (concat
-        (d/q '[:find [?user-id ...]
-               :where
-               [?rel :eacl.relationship/subject-type :user]
-               [?rel :eacl.relationship/subject ?subject]
-               [?subject :eacl/id ?user-id]]
-          db)
+        (when acl
+          (map (comp :id :subject)
+               (eacl/read-relationships acl {:subject/type :user})))
         (keep (fn [{:keys [id]}]
                 (when (d/entid db [:eacl/id id])
                   id))
-          quick-subjects))
+              quick-subjects))
        distinct
        (sort-by user-sort-key)))
 
 (defn paged-known-users
-  [db _client _acl state]
+  [db _client acl state]
   (let [requested-page (max 0 (long (or (get-in state [:ui :user-page])
                                         (:user-page state)
                                         0)))
         started-at     (now-nanos)
-        all-users      (vec (known-user-id-stream db))
+        all-users      (vec (known-user-id-stream db acl))
         total          (count all-users)
         max-page       (max 0 (long (quot (max 0 (dec total)) user-page-size)))
         effective-page (min requested-page max-page)
