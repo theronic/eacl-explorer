@@ -471,32 +471,38 @@
          :ready   "This EACL demo is backed by a client-side DataScript database, but would typically run server-side, backed by Datomic Pro."
          :seeding "Appending benchmark-style data into the live DataScript explorer."
          :writing-schema "Applying Spice schema changes to the live explorer."
-         "Booting the client explorer.")]
-      [:div.app-header__links
+         "Booting the client explorer.")]]
+     [:div.app-header__actions
+      [:div.app-header__sources
        [:a.app-header__link
         {:href "https://github.com/theronic/eacl"
          :target "_blank"
          :rel "noreferrer"}
-        "GitHub Source"]]]
-     [:div.app-header__actions
-      [:div.stat-host (server-stat-node stat)]
-      [:form.seed-controls
-       {:on-submit (fn [event]
-                     (.preventDefault event)
-                     (when (= :ready status)
-                       (app-state/seed-db!)))}
-       [:input.seed-input
-        {:id        "seed-size"
-         :name      "seed-size"
-         :type      "number"
-         :min       1
-         :step      1
-         :value     seed-size-input
-         :on-change #(app-state/set-seed-size! (.. % -target -value))}]
-       [:button.graph-toggle.seed-submit
-        {:type "submit"
-         :disabled (not= :ready status)}
-        "Seed DB"]]
+        "EACL Source"]
+       [:a.app-header__link
+        {:href "https://github.com/theronic/eacl-explorer"
+         :target "_blank"
+         :rel "noreferrer"}
+        "Explorer Source"]]
+      [:div.app-header__controls
+       [:div.stat-host (server-stat-node stat)]
+       [:form.seed-controls
+        {:on-submit (fn [event]
+                      (.preventDefault event)
+                      (when (= :ready status)
+                        (app-state/seed-db!)))}
+        [:input.seed-input
+         {:id        "seed-size"
+          :name      "seed-size"
+          :type      "number"
+          :min       1
+          :step      1
+          :value     seed-size-input
+          :on-change #(app-state/set-seed-size! (.. % -target -value))}]
+        [:button.graph-toggle.seed-submit
+         {:type "submit"
+          :disabled (not= :ready status)}
+         "Seed DB"]]]
       (when-let [seed-error (:seed-error bootstrap)]
         [:div.error-block.app-header__error seed-error])]]))
 
