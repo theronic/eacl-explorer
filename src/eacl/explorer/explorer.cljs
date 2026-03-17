@@ -821,6 +821,11 @@
    (schema-panel-data db acl nil))
   ([db acl _state]
    (let [{:keys [relations permissions]} (schema-data acl)
+         distinct-permissions
+         (->> permissions
+              (map (juxt :eacl.permission/resource-type :eacl.permission/permission-name))
+              distinct
+              vec)
          relation-targets (into {}
                            (map (fn [relation]
                                   [[(:eacl.relation/resource-type relation)
@@ -900,6 +905,9 @@
                                             :kind   "permission"}))))
                                vec)]
      {:schema-text (schema-source db)
+      :resource-count (count resource-kinds)
+      :relation-count (count relations)
+      :permission-count (count distinct-permissions)
       :nodes       (vec (concat resource-nodes permission-nodes))
       :links       (vec (concat relation-links definition-links permission-links))})))
 

@@ -131,6 +131,16 @@
                     total-text))
         "..."))))
 
+(defn- schema-heading-title
+  [{:keys [resource-count relation-count permission-count]}]
+  (str "Schema ("
+       (format-count (or resource-count 0))
+       " resources, "
+       (format-count (or relation-count 0))
+       " relations, "
+       (format-count (or permission-count 0))
+       " permissions)"))
+
 (declare render-resource-node)
 
 (defn- render-child-group
@@ -414,7 +424,7 @@
    [:button.group-card__toggle
      {:on-click #(app-state/toggle-schema!)}
      [:span.group-card__caret (if (:expanded? panel-data) "▾" "▸")]
-     [:span.group-card__title "Schema"]]
+     [:span.group-card__title (schema-heading-title panel-data)]]
     (when-let [status-text (cond
                              (:writing? panel-data) "Writing schema"
                              (:changed? panel-data) "Unsaved changes"
@@ -453,15 +463,21 @@
   (let [stat   (explorer/server-stat-data {:bootstrap bootstrap})
         status (:status bootstrap :booting)]
     [:header.app-header
-     [:div
+     [:div.app-header__intro
       [:p.eyebrow "EACL v7 + DataScript + Rum"]
-      [:h1.app-title "EACL Explorer"]
+      [:h1.app-title "🦅 EACL Explorer"]
       [:p.app-subtitle
        (case status
-         :ready   "This EACL demo is backed by a client-side DataScript database, but would typically run server-side, backed by Datomic Pro or Datomic Cloud."
+         :ready   "This EACL demo is backed by a client-side DataScript database, but would typically run server-side, backed by Datomic Pro."
          :seeding "Appending benchmark-style data into the live DataScript explorer."
          :writing-schema "Applying Spice schema changes to the live explorer."
-         "Booting the client explorer.")]]
+         "Booting the client explorer.")]
+      [:div.app-header__links
+       [:a.app-header__link
+        {:href "https://github.com/theronic/eacl"
+         :target "_blank"
+         :rel "noreferrer"}
+        "GitHub Source"]]]
      [:div.app-header__actions
       [:div.stat-host (server-stat-node stat)]
       [:form.seed-controls
@@ -477,7 +493,7 @@
          :step      1
          :value     seed-size-input
          :on-change #(app-state/set-seed-size! (.. % -target -value))}]
-       [:button.graph-toggle
+       [:button.graph-toggle.seed-submit
         {:type "submit"
          :disabled (not= :ready status)}
         "Seed DB"]]

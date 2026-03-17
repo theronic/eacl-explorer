@@ -218,6 +218,12 @@
             panel-data (explorer/schema-panel-data db client)]
         (is (string? (:schema-text panel-data)))
         (is (re-find #"definition account" (:schema-text panel-data)))
+        (is (= (:resource-count panel-data)
+               (count (filter #(= "resource" (:kind %)) (:nodes panel-data)))))
+        (is (= (:relation-count panel-data)
+               (count (filter #(= "relation" (:kind %)) (:links panel-data)))))
+        (is (= (:permission-count panel-data)
+               (count (filter #(= "defines" (:kind %)) (:links panel-data)))))
         (is (some #(= "permission" (:kind %)) (:nodes panel-data)))
         (is (some #(= "defines" (:kind %)) (:links panel-data)))
         (is (some #(= "permission" (:kind %)) (:links panel-data)))))))

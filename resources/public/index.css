@@ -99,6 +99,39 @@ button {
   font-size: 0.98rem;
 }
 
+.app-header__intro {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.app-header__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.app-header__link {
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.app-header__link:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.94);
+}
+
 .app-header__actions {
   display: flex;
   flex-wrap: wrap;
@@ -156,19 +189,34 @@ button {
 
 .seed-controls {
   display: flex;
-  gap: 10px;
-  align-items: center;
+  align-items: stretch;
   margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.82);
 }
 
 .seed-input {
-  min-width: 140px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.82);
+  flex: 1 1 150px;
+  min-width: 150px;
+  padding: 12px 14px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   font: inherit;
+}
+
+.seed-submit {
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 0;
+  background: #111317;
+  color: #fff7eb;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 
 .app-header__error {
@@ -182,6 +230,12 @@ button {
   transform: translateY(-1px);
   border-color: var(--border-strong);
   background: rgba(255, 255, 255, 0.94);
+}
+
+.seed-submit:hover {
+  transform: none;
+  border-color: transparent;
+  background: #1d2127;
 }
 
 .pagination-button:disabled,
@@ -347,6 +401,14 @@ button {
 .group-card__title,
 .relationship-group__title {
   font-weight: 700;
+}
+
+.schema-shell__header .group-card__toggle {
+  flex-wrap: wrap;
+}
+
+.schema-shell__header .group-card__stats {
+  min-width: 0;
 }
 
 .group-card__count,
@@ -615,8 +677,12 @@ button {
 
   .seed-controls {
     width: 100%;
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+  }
+
+  .seed-input,
+  .seed-submit {
+    width: auto;
   }
 
   .group-card__stats {
