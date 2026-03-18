@@ -687,11 +687,30 @@
        [:section.panel-host
         (detail-panel-view)]])))
 
+(defn- app-footer
+  []
+  [:footer.app-footer
+   [:p.app-footer__copy
+    "©️ 2026 Petrus Theron. Some rights reserved. Built using "
+    [:a.app-footer__link
+     {:href "https://github.com/theronic/eacl-explorer"
+      :target "_blank"
+      :rel "noreferrer"}
+     "eacl-explorer"]
+    " licensed under the "
+    [:a.app-footer__link
+     {:href "https://www.eclipse.org/legal/epl-2.0/"
+      :target "_blank"
+      :rel "noreferrer"}
+     "Eclipse Public Licence 2.0"]
+    "."]])
+
 (rum/defc app-root []
   [:div.app-shell
    (shell-header-view)
    (schema-shell-view)
-   (app-body-view)])
+   (app-body-view)
+   (app-footer)])
 
 (defn mount!
   []
