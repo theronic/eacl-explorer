@@ -13,9 +13,9 @@ seeded Explorer runtimes.
 - Each workload receives 20 warm-up calls followed by 30 measured samples.
 - Fast workloads are batched within each sample to improve timer resolution.
 - Seeding is excluded from every query measurement.
-- v8 uses `{:proof-mode :none}`. This measures the Explorer's uncached query
-  path and avoids charging each in-process query for secure cache-proof
-  construction that the demo does not reuse profitably.
+- v8 uses `{:cache cache/no-cache :proof-mode :none}`. This explicitly selects
+  the uncached query path and avoids charging each in-process query for secure
+  cache-proof construction that the demo does not reuse profitably.
 - Relationship insert and delete costs are intentionally excluded.
 
 The v7 and v8 page sizes are identical. Only their public pagination syntax
@@ -28,16 +28,16 @@ factor greater than 1 is a regression.
 
 | Workload | v7 p50 | v8 p50 | p50 factor | v7 p95 | v8 p95 | p95 factor |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Direct authorization allow | 34 | 590 | 17.35× | 46 | 742 | 16.13× |
-| Recursive authorization allow | 88 | 1,004 | 11.41× | 92 | 1,094 | 11.89× |
-| Recursive authorization deny | 352 | 1,254 | 3.56× | 372 | 1,296 | 3.48× |
-| Lookup visible server page (20) | 1,040 | 5,180 | 4.98× | 1,140 | 5,460 | 4.79× |
-| Count 4,000 visible servers | 11,800 | 24,900 | 2.11× | 18,600 | 26,100 | 1.40× |
-| Read account-to-server page (20 of 2,000 matches) | 170 | 84,130 | 494.88× | 210 | 86,650 | 412.62× |
-| Read known-user relationship page (20) | 240 | 3,000 | 12.50× | 290 | 3,330 | 11.48× |
+| Direct authorization allow | 34 | 466 | 13.71× | 46 | 796 | 17.30× |
+| Recursive authorization allow | 88 | 888 | 10.09× | 92 | 976 | 10.61× |
+| Recursive authorization deny | 352 | 1,128 | 3.20× | 372 | 1,168 | 3.14× |
+| Lookup visible server page (20) | 1,040 | 5,480 | 5.27× | 1,140 | 6,020 | 5.28× |
+| Count 4,000 visible servers | 11,800 | 25,800 | 2.19× | 18,600 | 26,500 | 1.42× |
+| Read account-to-server page (20 of 2,000 matches) | 170 | 88,840 | 522.59× | 210 | 91,970 | 437.95× |
+| Read known-user relationship page (20) | 240 | 3,180 | 13.25× | 290 | 3,290 | 11.34× |
 
 No measured read workload is faster on v8. The smallest median regression is
-the full visible-server count at 2.11×. The dominant hotspot is relationship
+the full visible-server count at 2.19×. The dominant hotspot is relationship
 pagination over a broad match set.
 
 ## Relationship cursor finding
