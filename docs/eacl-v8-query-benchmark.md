@@ -10,6 +10,8 @@ Measured on 2026-08-02 in Chromium with freshly seeded Explorer runtimes.
   `7df4d4be4f014786662197248f8c5ddbef17ab65`.
 - PR-#95 runtime: EACL v8 at
   `bb69a6bd17252bad6d9f2aacdd65a70cb9832c50`.
+- PR-#96 runtime: EACL v8 at
+  `73c5488ce35f949f471670f115b5fdccea4b1ec2`.
 - Dataset: 5 accounts, 20 teams, 10 VPCs, 10,000 servers, and 38 users.
 - Each workload receives 20 warm-up calls followed by 30 measured samples.
 - Fast workloads are batched within each sample to improve timer resolution.
@@ -19,6 +21,8 @@ Measured on 2026-08-02 in Chromium with freshly seeded Explorer runtimes.
 - PR #95 is measured both with its default client-private exact-current cache
   (the Explorer's production configuration) and with the same explicit
   `no-cache + proof-mode :none` configuration as the pre-PR-#95 run.
+- PR #96 uses the same default client-private exact-current cache configuration
+  as PR #95.
 - Cached counts became too fast for one invocation to resolve reliably against
   the browser's 0.1 ms timer, so the PR-#95 harness batches 50 count invocations
   per sample. All reported values remain per invocation.
@@ -26,6 +30,37 @@ Measured on 2026-08-02 in Chromium with freshly seeded Explorer runtimes.
 
 The v7 and v8 page sizes are identical. Only their public pagination syntax
 differs: v7 uses `:limit`; v8 uses Relay `:first`.
+
+## PR #96 upgrade verification
+
+Times are p50 microseconds per invocation from a fresh PR #96 runtime. The
+comparison uses the earlier PR #95 run on the same machine and browser.
+
+| Workload | PR #95 default cache | PR #96 default cache | Change |
+| --- | ---: | ---: | ---: |
+| Direct authorization allow | 34 | 34 | unchanged |
+| Recursive authorization allow | 30 | 32 | 6.7% slower |
+| Recursive authorization deny | 28 | 30 | 7.1% slower |
+| Lookup visible server page (20) | 3,540 | 4,500 | 27.1% slower |
+| Count 4,000 visible servers | 26 | 24 | 7.7% faster |
+| Read account-to-server page (20 of 2,000 matches) | 17,640 | 19,200 | 8.8% slower |
+| Read known-user relationship page (20) | 2,680 | 3,340 | 24.6% slower |
+
+Two additional PR #96 runs produced 4.46–4.82 ms for the lookup page,
+18.40–18.93 ms for the broad relationship page, and 3.40–3.41 ms for the
+known-user relationship page. The paginated-query regression is therefore
+repeatable in this browser session, not a single outlier. This benchmark does
+not isolate its cause; PR #96's stricter secure-format and cursor validation is
+a candidate that requires profiling before attribution.
+
+The fresh PR #96 run recorded 6,245 exact-current hits, 5 misses, and 5 cache
+puts, matching PR #95. It also recorded zero managed-current hits, bypasses,
+stamp failures, and admission entries. The cache-hit behavior is therefore
+unchanged for the Explorer's default configuration.
+
+PR #96 does not improve the Explorer query benchmark overall. It preserves the
+very fast authorization and completed-count cache hits, while paying measurable
+additional cost on paginated lookup and relationship reads.
 
 ## PR #95 results
 
@@ -74,6 +109,7 @@ reuse and removing the relationship cursor's complete-result digest.
 - Both Explorer browser builds compile with zero warnings.
 - The four Explorer browser test namespaces pass: 36 tests, 174 assertions,
   zero failures and zero errors.
+- The same compile and test results hold after upgrading to PR #96.
 - Every benchmark sample validates its semantic result: the expected allow or
   deny, a 20-item page, or exactly 4,000 visible servers.
 - Cached and explicit no-cache clients run against the same seeded DataScript
