@@ -1,7 +1,6 @@
 (ns eacl.explorer.seed
   (:require-macros [eacl.explorer.resource-macros :refer [inline-resource]])
   (:require [datascript.core :as d]
-            [eacl.cache :as cache]
             [eacl.core :as eacl :refer [->Relationship spice-object]]
             [eacl.datascript.core :as datascript]
             [goog.string :as gstring]
@@ -78,11 +77,9 @@
 (defn make-client
   [conn]
   ;; The Explorer uses EACL's default immutable :eacl/id identity contract.
-  ;; In-process DataScript queries are cheaper than secure proof
-  ;; sealing/validation at this demo's graph size, so keep the v8 cache off.
-  (datascript/make-client conn
-                          {:cache cache/no-cache
-                           :proof-mode :none}))
+  ;; EACL's default client-private exact-current cache is safe even if demo
+  ;; code performs unrelated DataScript transactions outside the EACL API.
+  (datascript/make-client conn {}))
 
 (defonce conn (create-conn))
 (defonce client (make-client conn))

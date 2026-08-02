@@ -109,7 +109,7 @@
                        :resource/type :server}
                       (page-options 20)))}
    {:name          :count-visible-servers
-    :invocations   1
+    :invocations   50
     :valid-result? #(= 4000 (:count %))
     :run!          #(eacl/count-resources
                      client
