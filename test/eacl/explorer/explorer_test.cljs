@@ -93,13 +93,35 @@
                                                          (app-state {:subject-id     "user-1"
                                                                      :permission     :view
                                                                      :group-expanded #{:server}
-                                                                     :group-prev     {:server [next-cursor]}}))
+                                                                     :group-pages
+                                                                     {:server
+                                                                      {:page-number 2
+                                                                       :page-options
+                                                                       {:first 20
+                                                                        :after next-cursor}}}}))
             server-group-2 (some #(when (= :server (:resource-type %)) %) second-page)
-            page-2-ids     (mapv :id (:items server-group-2))]
+            page-2-ids     (mapv :id (:items server-group-2))
+            previous-cursor (:previous-cursor server-group-2)
+            previous-page  (explorer/resource-panel-data
+                            db client
+                            (app-state
+                             {:subject-id     "user-1"
+                              :permission     :view
+                              :group-expanded #{:server}
+                              :group-pages
+                              {:server
+                               {:page-number 1
+                                :page-options
+                                {:last 20
+                                 :before previous-cursor}}}}))
+            previous-group (some #(when (= :server (:resource-type %)) %)
+                                 previous-page)]
         (is (string? next-cursor))
+        (is (string? previous-cursor))
         (is (= 20 (count page-1-ids)))
         (is (= 20 (count page-2-ids)))
-        (is (empty? (set/intersection (set page-1-ids) (set page-2-ids))))))))
+        (is (empty? (set/intersection (set page-1-ids) (set page-2-ids))))
+        (is (= page-1-ids (mapv :id (:items previous-group))))))))
 
 (deftest nested-resource-groups-render-from-live-child-section-state
   (support/with-test-runtime* :smoke

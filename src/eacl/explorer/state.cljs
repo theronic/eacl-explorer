@@ -92,7 +92,7 @@
 (defn- reset-navigation
   [ui]
   (assoc ui
-         :group-prev {}
+         :group-pages {}
          :nested-prev {}))
 
 (defn- resource-types
@@ -716,19 +716,42 @@
 
 (defn first-group-page!
   [resource-type]
-  (update-ui! #(assoc-in % [:group-prev resource-type] [])))
+  (update-ui!
+   #(update % :group-pages dissoc resource-type)))
 
 (defn prev-group-page!
-  [resource-type]
-  (update-ui! #(update-in % [:group-prev resource-type]
-                          (fn [stack]
-                            (vec (butlast (vec stack)))))))
+  [resource-type cursor-token]
+  (when cursor-token
+    (update-ui!
+     (fn [ui]
+       (let [page-number
+             (max 1
+                  (dec
+                   (get-in ui
+                           [:group-pages resource-type :page-number]
+                           1)))]
+         (assoc-in ui
+                   [:group-pages resource-type]
+                   {:page-number page-number
+                    :page-options
+                    {:last explorer/resource-page-size
+                     :before cursor-token}}))))))
 
 (defn next-group-page!
   [resource-type cursor-token]
   (when cursor-token
-    (update-ui! #(update-in % [:group-prev resource-type]
-                            (fnil conj []) cursor-token))))
+    (update-ui!
+     (fn [ui]
+       (assoc-in ui
+                 [:group-pages resource-type]
+                 {:page-number
+                  (inc
+                   (get-in ui
+                           [:group-pages resource-type :page-number]
+                           1))
+                  :page-options
+                  {:first explorer/resource-page-size
+                   :after cursor-token}})))))
 
 (defn toggle-expanded-resource!
   [resource]

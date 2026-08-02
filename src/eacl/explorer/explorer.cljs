@@ -101,7 +101,7 @@
    :selected-resource      nil
    :user-page              0
    :group-expanded         #{}
-   :group-prev             {}
+   :group-pages            {}
    :expanded-resource-keys #{}
    :expanded-section-keys  #{}
    :nested-prev            {}
@@ -163,19 +163,20 @@
                  #{})
     resource-type))
 
-(defn group-cursors
+(defn group-page
   [state resource-type]
-  (vec (or (get-in state [:ui :group-prev resource-type])
-           (get-in state [:group-prev resource-type])
-           [])))
+  (or (get-in state [:ui :group-pages resource-type])
+      (get-in state [:group-pages resource-type])
+      {:page-number 1
+       :page-options {:first resource-page-size}}))
 
 (defn group-page-number
   [state resource-type]
-  (inc (count (group-cursors state resource-type))))
+  (:page-number (group-page state resource-type)))
 
-(defn current-group-cursor
+(defn group-page-options
   [state resource-type]
-  (peek (group-cursors state resource-type)))
+  (:page-options (group-page state resource-type)))
 
 (defn forward-page-options
   [page-size cursor-token]
@@ -186,6 +187,11 @@
   [{:keys [page-info]}]
   (when (:has-next-page? page-info)
     (:end-cursor page-info)))
+
+(defn previous-page-cursor
+  [{:keys [page-info]}]
+  (when (:has-previous-page? page-info)
+    (:start-cursor page-info)))
 
 (defn resource-key
   [{:keys [type id]}]
@@ -634,9 +640,7 @@
                              {:subject       (seed/->user (current-subject-id state))
                               :permission    permission
                               :resource/type resource-type}
-                             (forward-page-options
-                              resource-page-size
-                              (current-group-cursor state resource-type))))
+                             (group-page-options state resource-type)))
                item-count (count (:items result))
                start      (if (pos? item-count)
                             (inc (* resource-page-size (dec (group-page-number state resource-type))))
@@ -645,12 +649,14 @@
             :page-end    (+ (max 0 (dec start)) item-count)
             :items       (:items result)
             :next-cursor (next-page-cursor result)
+            :previous-cursor (previous-page-cursor result)
             :error       (:error result)
             :time        (:time result)})
          {:page-start  0
           :page-end    0
           :items       []
           :next-cursor nil
+          :previous-cursor nil
           :time        nil})))))
 
 (declare build-resource-node)

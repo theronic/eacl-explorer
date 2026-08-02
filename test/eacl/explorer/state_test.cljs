@@ -30,7 +30,10 @@
   (reset! state/!app {:bootstrap (ready-bootstrap)
                       :ui        (assoc explorer/default-ui-state
                                    :selected-resource {:type :server :id "server-0001-0001"}
-                                   :group-prev {:server ["cursor-1"]}
+                                   :group-pages {:server {:page-number 2
+                                                         :page-options
+                                                         {:first 20
+                                                          :after "cursor-1"}}}
                                    :nested-prev {"account|account-0001>server" ["server-0001-0005"]})
                       :counts    {:server {:status "done" :count 12 :time "1.00ms" :job-id nil}}
                       :child-sections {"account|account-0001>server" {:status "ready"}}
@@ -41,7 +44,7 @@
   (is (= "user-2" (get-in @state/!app [:ui :subject-id])))
   (is (= {:type :server :id "server-0001-0001"}
          (get-in @state/!app [:ui :selected-resource])))
-  (is (= {} (get-in @state/!app [:ui :group-prev])))
+  (is (= {} (get-in @state/!app [:ui :group-pages])))
   (is (= {} (get-in @state/!app [:ui :nested-prev])))
   (is (= {} (:child-sections @state/!app)))
   (is (= explorer/default-count-state (:counts @state/!app))))
@@ -49,7 +52,10 @@
 (deftest select-permission-resets-pagination-and-persists-permission
   (reset! state/!app {:bootstrap (ready-bootstrap)
                       :ui        (assoc explorer/default-ui-state
-                                   :group-prev {:server ["cursor-1"]}
+                                   :group-pages {:server {:page-number 2
+                                                         :page-options
+                                                         {:first 20
+                                                          :after "cursor-1"}}}
                                    :nested-prev {"account|account-0001>server" ["server-0001-0005"]})
                       :counts    {:server {:status "done" :count 12 :time "1.00ms" :job-id nil}}
                       :child-sections {"account|account-0001>server" {:status "ready"}}
@@ -58,7 +64,7 @@
                 state/restart-expanded-child-section-jobs! (fn [] nil)]
     (state/select-permission! :admin))
   (is (= :admin (get-in @state/!app [:ui :permission])))
-  (is (= {} (get-in @state/!app [:ui :group-prev])))
+  (is (= {} (get-in @state/!app [:ui :group-pages])))
   (is (= {} (get-in @state/!app [:ui :nested-prev])))
   (is (= {} (:child-sections @state/!app)))
   (is (= explorer/default-count-state (:counts @state/!app))))
@@ -68,6 +74,20 @@
   (is (true? (get-in @state/!app [:ui :schema-expanded?])))
   (state/toggle-schema!)
   (is (false? (get-in @state/!app [:ui :schema-expanded?]))))
+
+(deftest top-level-pagination-uses-relay-directional-requests
+  (state/next-group-page! :server "page-1-end")
+  (is (= {:page-number 2
+          :page-options {:first explorer/resource-page-size
+                         :after "page-1-end"}}
+         (get-in @state/!app [:ui :group-pages :server])))
+  (state/prev-group-page! :server "page-2-start")
+  (is (= {:page-number 1
+          :page-options {:last explorer/resource-page-size
+                         :before "page-2-start"}}
+         (get-in @state/!app [:ui :group-pages :server])))
+  (state/first-group-page! :server)
+  (is (nil? (get-in @state/!app [:ui :group-pages :server]))))
 
 (deftest db-change-invalidates-counts-and-bumps-db-rev
   (reset! state/!app {:bootstrap (ready-bootstrap)

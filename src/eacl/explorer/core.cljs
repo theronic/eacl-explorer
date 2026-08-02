@@ -243,15 +243,17 @@
          (when-let [error (:error group)]
            [:span.tree-meta__error error])]
         [:div.pagination-row
-        [:button.pagination-button
+         [:button.pagination-button
           {:on-click #(app-state/first-group-page! resource-type)
            :disabled (or (not (:supported? group))
                          (= 1 (:page-number group)))}
           "First"]
          [:button.pagination-button
-          {:on-click #(app-state/prev-group-page! resource-type)
+          {:on-click #(app-state/prev-group-page!
+                       resource-type
+                       (:previous-cursor group))
            :disabled (or (not (:supported? group))
-                         (= 1 (:page-number group)))}
+                         (nil? (:previous-cursor group)))}
           "Prev"]
          [:button.pagination-button
           {:on-click #(app-state/next-group-page! resource-type (:next-cursor group))
@@ -533,14 +535,14 @@
    :db-rev db-rev})
 
 (defn- group-view-state
-  [resource-type subject-id permission group-expanded group-cursors
+  [resource-type subject-id permission group-expanded group-page
    expanded-resource-keys expanded-section-keys nested-prev count-entry child-sections db-rev]
   {:ui {:subject-id             subject-id
         :permission             permission
         :group-expanded         (if (contains? group-expanded resource-type)
                                   #{resource-type}
                                   #{})
-        :group-prev             {resource-type (vec (or group-cursors []))}
+        :group-pages            {resource-type group-page}
         :expanded-resource-keys expanded-resource-keys
         :expanded-section-keys  expanded-section-keys
         :nested-prev            nested-prev}
@@ -613,7 +615,7 @@
         permission             (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
                                        explorer/normalize-permission-name)
         group-expanded         (rum/react (rum/cursor-in app-state/!app [:ui :group-expanded]))
-        group-cursors          (rum/react (rum/cursor-in app-state/!app [:ui :group-prev resource-type]))
+        group-page             (rum/react (rum/cursor-in app-state/!app [:ui :group-pages resource-type]))
         expanded-resource-keys (rum/react (rum/cursor-in app-state/!app [:ui :expanded-resource-keys]))
         expanded-section-keys  (rum/react (rum/cursor-in app-state/!app [:ui :expanded-section-keys]))
         nested-prev            (rum/react (rum/cursor-in app-state/!app [:ui :nested-prev]))
@@ -626,7 +628,7 @@
                                  subject-id
                                  permission
                                  group-expanded
-                                 group-cursors
+                                 group-page
                                  expanded-resource-keys
                                  expanded-section-keys
                                  nested-prev

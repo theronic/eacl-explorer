@@ -31,6 +31,33 @@ Measured on 2026-08-02 in Chromium with freshly seeded Explorer runtimes.
 The v7 and v8 page sizes are identical. Only their public pagination syntax
 differs: v7 uses `:limit`; v8 uses Relay `:first`.
 
+## Relay continuation cache fix
+
+EACL commit `34286ca5b3aaa0c4dc9277d600b6efe110d69f1a` makes an
+authenticated continuation cacheable when cursor selection retains the current
+immutable snapshot. If the graph has advanced, the cursor still reconstructs
+its original historical snapshot and bypasses the current-answer cache.
+
+The Explorer stores only the Relay request and page number. It does not cache
+query results. Next sends `first/after`, Prev sends `last/before`, and First
+resets to a cursor-free `first` request.
+
+The following comparison uses a freshly seeded 10,000-server runtime,
+`super-user`, `:view`, page size 20, 20 warm-up calls, and 50 measured repeats
+of page two:
+
+| EACL revision | p50 | p95 | Completed-cache result |
+| --- | ---: | ---: | --- |
+| PR #96 (`73c5488`) | 13.0 ms | 13.8 ms | 50/50 bypassed |
+| Continuation fix (`34286ca`) | 10.7 ms | 11.6 ms | 50/50 exact-current hits |
+
+The median repeated-page cost fell by 17.7%. An interactive development-build
+check showed the repeated forward page falling from 42.7 ms cold to 25.5 ms
+cached, and the repeated backward page from 58.5 ms cold to 24.2 ms cached.
+Those two UI timings are single observations rather than benchmark samples;
+they verify that both Relay directions use EACL's cache through the real
+Explorer controls.
+
 ## PR #96 upgrade verification
 
 Times are p50 microseconds per invocation from a fresh PR #96 runtime. The
