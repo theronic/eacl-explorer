@@ -196,62 +196,28 @@
                   :count  nil
                   :time   nil
                   :job-id job-id})
-          (letfn [(step [cursor-token total limit elapsed seen-cursors]
-                    (when (same-job-context? @!app resource-type job-id context)
-                      (let [{:keys [count error cursor time]}
-                            (explorer/try-count-resources acl
-                                                          (cond-> {:subject       (seed/->user (:subject-id context))
-                                                                   :permission    (:permission context)
-                                                                   :resource/type resource-type
-                                                                   :limit         limit}
-                                                            cursor-token (assoc :cursor cursor-token)))
-                            elapsed'  (+ elapsed (or time 0))
-                            repeated? (and cursor
-                                           (or (= cursor cursor-token)
-                                               (contains? seen-cursors cursor)))]
-                        (cond
-                          error
-                          (publish-count! resource-type job-id context
-                                          {:status "error"
-                                           :count  nil
-                                           :time   (explorer/human-duration elapsed')}
-                                          true)
-
-                          repeated?
-                          (if (zero? count)
-                            (publish-count! resource-type job-id context
-                                            {:status "done"
-                                             :count  (+ total count)
-                                             :time   (explorer/human-duration elapsed')}
-                                            true)
-                            (publish-count! resource-type job-id context
-                                            {:status "error"
-                                             :count  nil
-                                             :time   (explorer/human-duration elapsed')}
-                                            true))
-
-                          cursor
-                          (do
-                            (publish-count! resource-type job-id context
-                                            {:status "loading"
-                                             :count  (+ total count)
-                                             :time   (explorer/human-duration elapsed')}
-                                            false)
-                            (js/setTimeout
-                             #(step cursor
-                                    (+ total count)
-                                    (min 5000 (* 2 limit))
-                                    elapsed'
-                                    (conj seen-cursors cursor))
-                             0))
-
-                          :else
-                          (publish-count! resource-type job-id context
-                                          {:status "done"
-                                           :count  (+ total count)
-                                           :time   (explorer/human-duration elapsed')}
-                                          true)))))]
-            (js/setTimeout #(step nil 0 250 0 #{}) 0)))))))
+          (js/setTimeout
+           (fn []
+             (when (same-job-context? @!app resource-type job-id context)
+               (let [{:keys [count error time]}
+                     (explorer/try-count-resources
+                      acl
+                      {:subject       (seed/->user (:subject-id context))
+                       :permission    (:permission context)
+                       :resource/type resource-type})]
+                 (publish-count!
+                  resource-type
+                  job-id
+                  context
+                  (if error
+                    {:status "error"
+                     :count  nil
+                     :time   (explorer/human-duration time)}
+                    {:status "done"
+                     :count  count
+                     :time   (explorer/human-duration time)})
+                  true))))
+           0))))))
 
 (defn start-count-jobs!
   []
@@ -360,13 +326,14 @@
 
 (defn- read-child-relationships
   [acl parent resource-type relation-name cursor-token limit]
-  (eacl/read-relationships acl
-                           {:subject/type      (:type parent)
-                            :subject/id        (:id parent)
-                            :resource/type     resource-type
-                            :resource/relation relation-name
-                            :cursor            cursor-token
-                            :limit             limit}))
+  (eacl/read-relationships
+   acl
+   (merge
+    {:subject/type      (:type parent)
+     :subject/id        (:id parent)
+     :resource/type     resource-type
+     :resource/relation relation-name}
+    (explorer/forward-page-options limit cursor-token))))
 
 (defn- resource-authorized?
   [acl subject permission permission-implied? resource]
@@ -399,12 +366,13 @@
 (defn- replay-child-page-cursor
   [acl parent resource-type relation-name cursor-token consumed-count]
   (when (pos? consumed-count)
-    (:cursor (read-child-relationships acl
-                                       parent
-                                       resource-type
-                                       relation-name
-                                       cursor-token
-                                       consumed-count))))
+    (explorer/next-page-cursor
+     (read-child-relationships acl
+                               parent
+                               resource-type
+                               relation-name
+                               cursor-token
+                               consumed-count))))
 
 (defn- launch-single-relation-total-job!
   [section-key context parent resource-type relation-name job-id permission-implied?]
@@ -414,16 +382,15 @@
     (letfn [(step [cursor-token total]
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
-                  (let [{relationships :data
-                         next-cursor   :cursor}
+                  (let [{relationships :data :as page}
                         (read-child-relationships acl
                                                   parent
                                                   resource-type
                                                   relation-name
                                                   cursor-token
                                                   child-section-count-batch-size)
-                        more-batches? (and (= child-section-count-batch-size (count relationships))
-                                           (some? next-cursor)
+                        next-cursor   (explorer/next-page-cursor page)
+                        more-batches? (and (some? next-cursor)
                                            (not= next-cursor cursor-token))
                         total'        (+ total
                                          (if permission-implied?
@@ -487,16 +454,15 @@
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
                   (let [batch-limit      (child-page-batch-limit permission-implied?)
-                        {relationships    :data
-                         next-batch-cursor :cursor}
+                        {relationships :data :as page}
                         (read-child-relationships acl
                                                   parent
                                                   resource-type
                                                   relation-name
                                                   cursor-token
                                                   batch-limit)
-                        more-batches?    (and (= batch-limit (count relationships))
-                                              (some? next-batch-cursor)
+                        next-batch-cursor (explorer/next-page-cursor page)
+                        more-batches?    (and (some? next-batch-cursor)
                                               (not= next-batch-cursor cursor-token))]
                     (if permission-implied?
                       (finish-page! (mapv :resource relationships)
@@ -556,15 +522,18 @@
               (when (same-child-job-context? @!app section-key job-id context)
                 (if-let [relation-def (first remaining-defs)]
                   (try
-                    (let [{relationships   :data
-                           next-cursor-token :cursor}
-                          (eacl/read-relationships acl
-                                                   {:subject/type      (:type parent)
-                                                    :subject/id        (:id parent)
-                                                    :resource/type     resource-type
-                                                    :resource/relation (:eacl.relation/relation-name relation-def)
-                                                    :cursor            cursor-token
-                                                    :limit             child-section-batch-size})
+                    (let [{relationships :data :as page}
+                          (eacl/read-relationships
+                           acl
+                           (merge
+                            {:subject/type      (:type parent)
+                             :subject/id        (:id parent)
+                             :resource/type     resource-type
+                             :resource/relation (:eacl.relation/relation-name relation-def)}
+                            (explorer/forward-page-options
+                             child-section-batch-size
+                             cursor-token)))
+                          next-cursor-token (explorer/next-page-cursor page)
                           resources      (map :resource relationships)
                           [seen' authorized']
                           (reduce (fn [[seen-resources authorized-resources] resource]
@@ -578,8 +547,7 @@
                                            authorized-resources]))))
                                   [seen authorized]
                                   resources)
-                          more?            (and (= child-section-batch-size (count relationships))
-                                                (some? next-cursor-token)
+                          more?            (and (some? next-cursor-token)
                                                 (not= next-cursor-token cursor-token))]
                       (js/setTimeout
                        #(step (if more? remaining-defs (next remaining-defs))

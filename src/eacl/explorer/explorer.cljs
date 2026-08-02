@@ -177,6 +177,16 @@
   [state resource-type]
   (peek (group-cursors state resource-type)))
 
+(defn forward-page-options
+  [page-size cursor-token]
+  (cond-> {:first page-size}
+    cursor-token (assoc :after cursor-token)))
+
+(defn next-page-cursor
+  [{:keys [page-info]}]
+  (when (:has-next-page? page-info)
+    (:end-cursor page-info)))
+
 (defn resource-key
   [{:keys [type id]}]
   (str (or (identifier-label type) "unknown") "|" id))
@@ -520,16 +530,16 @@
           (loop [cursor-token nil
                  seen-cursors #{}
                  relationships []]
-            (let [{:keys [data cursor]}
-                  (eacl/read-relationships acl
-                                           (cond-> {:subject/type :user
-                                                    :limit        1000}
-                                             cursor-token (assoc :cursor cursor-token)))
+            (let [{:keys [data] :as page}
+                  (eacl/read-relationships
+                   acl
+                   (merge {:subject/type :user}
+                          (forward-page-options user-page-size cursor-token)))
+                  cursor         (next-page-cursor page)
                   relationships' (into relationships data)
                   repeated?      (or (nil? cursor)
                                      (contains? seen-cursors cursor))]
-              (if (and (= 1000 (count data))
-                       (not repeated?))
+              (if-not repeated?
                 (recur cursor
                        (conj seen-cursors cursor)
                        relationships')
@@ -568,7 +578,7 @@
   [db acl query]
   (let [started-at (now-nanos)]
     (try
-      (let [{:keys [data cursor] :as result}
+      (let [{:keys [data] :as result}
             (eacl/lookup-resources acl
               (assoc query :consistency consistency/fully-consistent))]
         (assoc result
@@ -577,7 +587,7 @@
       (catch :default ex
         {:items  []
          :data   []
-         :cursor nil
+         :page-info nil
          :error  (ex-message ex)
          :time   (- (now-nanos) started-at)}))))
 
@@ -590,7 +600,6 @@
         (assoc result :time (- (now-nanos) started-at)))
       (catch :default ex
         {:count  0
-         :cursor nil
          :error  (ex-message ex)
          :time   (- (now-nanos) started-at)}))))
 
@@ -621,11 +630,13 @@
       (merge
        (if supported?
          (let [result     (try-lookup-resources db acl
-                            {:subject       (seed/->user (current-subject-id state))
-                             :permission    permission
-                             :resource/type resource-type
-                             :cursor        (current-group-cursor state resource-type)
-                             :limit         resource-page-size})
+                            (merge
+                             {:subject       (seed/->user (current-subject-id state))
+                              :permission    permission
+                              :resource/type resource-type}
+                             (forward-page-options
+                              resource-page-size
+                              (current-group-cursor state resource-type))))
                item-count (count (:items result))
                start      (if (pos? item-count)
                             (inc (* resource-page-size (dec (group-page-number state resource-type))))
@@ -633,7 +644,7 @@
            {:page-start  (if (pos? item-count) start 0)
             :page-end    (+ (max 0 (dec start)) item-count)
             :items       (:items result)
-            :next-cursor (:cursor result)
+            :next-cursor (next-page-cursor result)
             :error       (:error result)
             :time        (:time result)})
          {:page-start  0

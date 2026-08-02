@@ -1,5 +1,6 @@
 (ns eacl.explorer.test-runner
   (:require [cljs.test :as t]
+            [eacl.bench.query-benchmark]
             [eacl.explorer.core-test]
             [eacl.explorer.explorer-test]
             [eacl.explorer.seed-test]
