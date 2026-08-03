@@ -6,7 +6,7 @@
             [goog.string :as gstring]
             [goog.string.format]))
 
-(def seed-version 2)
+(def seed-version 3)
 (def seed-marker-id "eacl-explorer/seed-state")
 (def root-user-count 3)
 (def default-seed-size 10000)
@@ -76,9 +76,10 @@
 
 (defn make-client
   [conn]
-  (datascript/make-client conn
-    {:entity->object-id     (fn [entity] (:eacl/id entity))
-     :object-id->lookup-ref (fn [object-id] [:eacl/id object-id])}))
+  ;; The Explorer uses EACL's default immutable :eacl/id identity contract.
+  ;; EACL's default client-private exact-current cache is safe even if demo
+  ;; code performs unrelated DataScript transactions outside the EACL API.
+  (datascript/make-client conn {}))
 
 (defonce conn (create-conn))
 (defonce client (make-client conn))

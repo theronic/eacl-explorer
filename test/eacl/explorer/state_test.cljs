@@ -194,10 +194,12 @@
                           (range 1 21))
         page-2      (mapv (fn [n] {:type :server :id (str "server-page-2-" n)})
                           (range 1 21))
-        responses   {nil        {:data   (mapv (fn [resource] {:resource resource}) page-1)
-                                 :cursor "cursor-2"}
-                     "cursor-2" {:data   (mapv (fn [resource] {:resource resource}) page-2)
-                                 :cursor "cursor-3"}}
+        responses   {nil        {:data (mapv (fn [resource] {:resource resource}) page-1)
+                                 :page-info {:end-cursor "cursor-2"
+                                             :has-next-page? true}}
+                     "cursor-2" {:data (mapv (fn [resource] {:resource resource}) page-2)
+                                 :page-info {:end-cursor "cursor-3"
+                                             :has-next-page? true}}}
         calls       (atom [])]
     (reset! state/!runtime {:conn :conn :client :client})
     (reset! state/!app {:bootstrap (ready-bootstrap)

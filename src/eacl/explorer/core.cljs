@@ -464,7 +464,7 @@
         status (:status bootstrap :booting)]
     [:header.app-header
      [:div.app-header__intro
-      [:p.eyebrow "EACL v7 + DataScript + Rum"]
+      [:p.eyebrow "EACL v8 + DataScript + Rum"]
       [:h1.app-title "🦅 EACL Explorer"]
       [:p.app-subtitle
        (case status

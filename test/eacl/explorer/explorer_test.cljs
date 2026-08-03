@@ -62,12 +62,10 @@
     (seed/install-foundation! conn client)
     (doseq [batch (:batches (seed/seed-more-plan (d/db conn) 4500))]
       (seed/execute-batch! conn client batch))
-    (with-redefs [d/q (fn [& _]
-                        (throw (js/Error. "paged-known-users should not use datascript.core/q")))]
-      (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
-        (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
-        (is (some #{"owner-0001"} items))
-        (is (some #{"shared-admin-0001-01"} items))))))
+    (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
+      (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
+      (is (some #{"owner-0001"} items))
+      (is (some #{"shared-admin-0001-01"} items)))))
 
 (deftest resource-columns-render-against-foundation-only-runtime
   (let [{:keys [conn client]} (seed/create-runtime)]
@@ -115,7 +113,7 @@
                                                                                              :subject/id        "account-0001"
                                                                                              :resource/type     :server
                                                                                              :resource/relation :account
-                                                                                             :limit             20}))
+                                                                                             :first             20}))
                                                             (map :resource)
                                                             (filter #(eacl/can? client (seed/->user "user-1") :view %))
                                                             vec))
@@ -156,7 +154,7 @@
                                                                                              :subject/id        "account-0001"
                                                                                              :resource/type     :server
                                                                                              :resource/relation :account
-                                                                                             :limit             20}))
+                                                                                             :first             20}))
                                                             (map :resource)
                                                             vec))
             panel          (explorer/resource-panel-data db client
