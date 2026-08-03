@@ -143,8 +143,46 @@ button {
 .app-header__controls {
   display: flex;
   flex-wrap: wrap;
+  align-items: stretch;
   justify-content: flex-end;
   gap: 12px;
+}
+
+.cache-controls {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.cache-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.68);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.cache-toggle:has(.cache-toggle__input:checked) {
+  border-color: rgba(13, 143, 115, 0.42);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.cache-toggle__input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.cache-toggle:has(.cache-toggle__input:disabled),
+.graph-toggle:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .stat-host {
@@ -709,6 +747,15 @@ button {
     justify-content: flex-start;
   }
 
+  .cache-controls {
+    width: 100%;
+  }
+
+  .cache-toggle {
+    flex: 1 1 50%;
+    justify-content: center;
+  }
+
   .graph-toggle,
   .chip,
   .subject-button,
@@ -725,6 +772,11 @@ button {
 
   .seed-input,
   .seed-submit {
+    width: auto;
+  }
+
+  .cache-clear {
+    flex: 1 1 50%;
     width: auto;
   }
 

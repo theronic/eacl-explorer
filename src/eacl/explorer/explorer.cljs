@@ -103,6 +103,7 @@
    :expanded-resource-keys #{}
    :expanded-section-keys  #{}
    :nested-prev            {}
+   :cache-enabled?         false
    :schema-expanded?       false
    :schema-draft           seed/multipath-schema-dsl
    :seed-size-input        (str seed/default-seed-size)})
@@ -147,6 +148,11 @@
   (some-> (or (get-in state [:ui :permission])
               (:permission state))
           normalize-permission-name))
+
+(defn cache-enabled?
+  [state]
+  (true? (or (get-in state [:ui :cache-enabled?])
+             (:cache-enabled? state))))
 
 (defn selected-resource
   [state]
@@ -542,7 +548,9 @@
     (try
       (let [{:keys [data] :as result}
             (eacl/lookup-resources acl
-              (assoc query :consistency consistency/fully-consistent))]
+              (assoc query
+                     :cache? (true? (:cache? query))
+                     :consistency consistency/fully-consistent))]
         (assoc result
           :items (hydrate-objects db data)
           :time  (- (now-nanos) started-at)))
@@ -558,7 +566,9 @@
   (let [started-at (now-nanos)]
     (try
       (let [result (eacl/count-resources acl
-                     (assoc query :consistency consistency/fully-consistent))]
+                     (assoc query
+                            :cache? (true? (:cache? query))
+                            :consistency consistency/fully-consistent))]
         (assoc result :time (- (now-nanos) started-at)))
       (catch :default ex
         {:count  0
@@ -595,7 +605,8 @@
                             (merge
                              {:subject       (seed/->user (current-subject-id state))
                               :permission    permission
-                              :resource/type resource-type}
+                              :resource/type resource-type
+                              :cache?        (cache-enabled? state)}
                              (group-page-options state resource-type)))
                item-count (count (:items result))
                start      (if (pos? item-count)
@@ -775,6 +786,7 @@
                              {:resource     resource-ref
                               :permission   permission
                               :subject/type :user
+                              :cache?        (cache-enabled? state)
                               :consistency  consistency/fully-consistent})]
                        {:permission permission
                         :subjects   (->> data

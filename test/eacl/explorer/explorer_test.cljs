@@ -19,6 +19,45 @@
     :child-sections child-sections
     :db-rev         db-rev}))
 
+(deftest explorer-cache-is-disabled-by-default
+  (is (false? (:cache-enabled? explorer/default-ui-state)))
+  (is (false? (explorer/cache-enabled? (app-state {}))))
+  (is (true? (explorer/cache-enabled?
+              (app-state {:cache-enabled? true})))))
+
+(deftest top-level-eacl-queries-default-to-cache-off
+  (let [lookup-queries (atom [])
+        count-queries  (atom [])]
+    (with-redefs [eacl/lookup-resources
+                  (fn [_ query]
+                    (swap! lookup-queries conj query)
+                    {:data []})
+                  eacl/count-resources
+                  (fn [_ query]
+                    (swap! count-queries conj query)
+                    {:count 0})]
+      (explorer/try-lookup-resources nil :acl {})
+      (explorer/try-lookup-resources nil :acl {:cache? true})
+      (explorer/try-count-resources :acl {})
+      (explorer/try-count-resources :acl {:cache? true}))
+    (is (= [false true] (mapv :cache? @lookup-queries)))
+    (is (= [false true] (mapv :cache? @count-queries)))))
+
+(deftest resource-list-queries-follow-the-cache-toggle
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [state    {:subject-id "user-1"
+                      :group-expanded #{:server}}
+            uncached (explorer/top-level-group-data
+                      (d/db conn) client (app-state state) :server)
+            cached   (explorer/top-level-group-data
+                      (d/db conn) client
+                      (app-state (assoc state :cache-enabled? true))
+                      :server)]
+        (is (seq (:items uncached)))
+        (is (= (mapv :id (:items uncached))
+               (mapv :id (:items cached))))))))
+
 (deftest known-user-directory-pages-from-live-eacl-data
   (support/with-test-runtime* :smoke
     (fn [{:keys [conn client]}]
@@ -233,6 +272,28 @@
         (is (= "server-0001-0001" (get-in details [:resource :id])))
         (is (= :server (get-in details [:resource :type])))
         (is (seq (:permissions details)))))))
+
+(deftest detail-eacl-queries-follow-the-cache-toggle
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [queries (atom [])
+            state   {:selected-resource {:type :server :id "server-0001-0001"}
+                     :subject-id "user-1"}]
+        (with-redefs [eacl/lookup-subjects
+                      (fn [_ query]
+                        (swap! queries conj query)
+                        {:data []})]
+          (explorer/resource-detail-data
+           (d/db conn) client (app-state state))
+          (let [uncached-query-count (count @queries)]
+            (is (pos? uncached-query-count))
+            (is (every? false? (map :cache? @queries)))
+            (reset! queries [])
+            (explorer/resource-detail-data
+             (d/db conn) client
+             (app-state (assoc state :cache-enabled? true)))
+            (is (= uncached-query-count (count @queries)))
+            (is (every? true? (map :cache? @queries)))))))))
 
 (deftest schema-panel-data-includes-source-and-permission-nodes
   (support/with-test-runtime* :smoke

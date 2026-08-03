@@ -1,6 +1,7 @@
 (ns eacl.explorer.state-test
   (:require [cljs.test :refer-macros [deftest is use-fixtures]]
             [eacl.core :as eacl]
+            [eacl.datascript.core :as eacl-datascript]
             [eacl.explorer.explorer :as explorer]
             [eacl.explorer.seed :as seed]
             [eacl.explorer.state :as state]))
@@ -12,7 +13,8 @@
                       :ui        explorer/default-ui-state
                       :counts    explorer/default-count-state
                       :child-sections {}
-                      :db-rev    0}))
+                      :db-rev    0
+                      :query-rev 0}))
 
 (defn- ready-bootstrap
   []
@@ -74,6 +76,83 @@
   (is (true? (get-in @state/!app [:ui :schema-expanded?])))
   (state/toggle-schema!)
   (is (false? (get-in @state/!app [:ui :schema-expanded?]))))
+
+(deftest cache-toggle-refreshes-eacl-query-results
+  (reset! state/!app {:bootstrap (ready-bootstrap)
+                      :ui        explorer/default-ui-state
+                      :counts    {:server {:status "done" :count 12}}
+                      :child-sections {"account|account-0001>server" {:status "ready"}}
+                      :db-rev    0
+                      :query-rev 0})
+  (let [count-restarts (atom 0)
+        child-restarts (atom 0)]
+    (with-redefs [state/start-count-jobs!
+                  (fn [] (swap! count-restarts inc))
+                  state/restart-expanded-child-section-jobs!
+                  (fn [] (swap! child-restarts inc))]
+      (state/set-cache-enabled! true)
+      (is (true? (get-in @state/!app [:ui :cache-enabled?])))
+      (is (= 1 (:query-rev @state/!app)))
+      (is (= {} (:child-sections @state/!app)))
+      (is (= explorer/default-count-state (:counts @state/!app)))
+      (state/set-cache-enabled! true)
+      (is (= 1 (:query-rev @state/!app)))
+      (state/set-cache-enabled! false)
+      (is (false? (get-in @state/!app [:ui :cache-enabled?])))
+      (is (= 2 (:query-rev @state/!app))))
+    (is (= 2 @count-restarts))
+    (is (= 2 @child-restarts))))
+
+(deftest clear-cache-evicts-eacl-cache-and-refreshes-query-results
+  (let [{:keys [conn client]} (seed/create-runtime)
+        _               (seed/install-foundation! conn client)
+        expired         (atom [])
+        count-restarts (atom 0)
+        child-restarts (atom 0)]
+    (reset! state/!runtime {:conn conn :client client})
+    (reset! state/!app {:bootstrap (ready-bootstrap)
+                        :ui        explorer/default-ui-state
+                        :counts    {:server {:status "done" :count 12}}
+                        :child-sections {"account|account-0001>server" {:status "ready"}}
+                        :db-rev    0
+                        :query-rev 3})
+    (with-redefs [eacl-datascript/expire-cache!
+                  (fn [acl] (swap! expired conj acl))
+                  state/start-count-jobs!
+                  (fn [] (swap! count-restarts inc))
+                  state/restart-expanded-child-section-jobs!
+                  (fn [] (swap! child-restarts inc))]
+      (state/clear-cache!))
+    (is (= [client] @expired))
+    (is (= 4 (:query-rev @state/!app)))
+    (is (= {} (:child-sections @state/!app)))
+    (is (= explorer/default-count-state (:counts @state/!app)))
+    (is (= 1 @count-restarts))
+    (is (= 1 @child-restarts))))
+
+(deftest nested-eacl-queries-follow-the-cache-toggle
+  (let [relationship-queries (atom [])
+        authorization-queries (atom [])]
+    (with-redefs [eacl/read-relationships
+                  (fn [_ query]
+                    (swap! relationship-queries conj query)
+                    {:data []})
+                  eacl/can?
+                  (fn [_ query]
+                    (swap! authorization-queries conj query)
+                    true)]
+      (#'state/read-child-relationships
+       :acl {:type :account :id "account-1"} :server :account nil 20 false)
+      (#'state/read-child-relationships
+       :acl {:type :account :id "account-1"} :server :account nil 20 true)
+      (#'state/resource-authorized?
+       :acl {:type :user :id "user-1"} :view false
+       {:type :server :id "server-1"} false)
+      (#'state/resource-authorized?
+       :acl {:type :user :id "user-1"} :view false
+       {:type :server :id "server-1"} true))
+    (is (= [false true] (mapv :cache? @relationship-queries)))
+    (is (= [false true] (mapv :cache? @authorization-queries)))))
 
 (deftest top-level-pagination-uses-relay-directional-requests
   (state/next-group-page! :server "page-1-end")
@@ -242,7 +321,7 @@
                   state/client (fn [] :acl)
                   state/db (fn [] :db)
                   state/read-child-relationships
-                  (fn [_ _ _ _ cursor-token limit]
+                  (fn [_ _ _ _ cursor-token limit _cache?]
                     (swap! calls conj [cursor-token limit])
                     (get responses cursor-token))
                   state/launch-single-relation-total-job! (fn [& _] nil)
