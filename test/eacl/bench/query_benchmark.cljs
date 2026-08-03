@@ -127,14 +127,22 @@
                        :resource/type     :server
                        :resource/relation :account}
                       (page-options 20)))}
-   {:name          :read-known-user-relationship-page-20
+   {:name          :lookup-known-user-page-20
     :invocations   10
-    :valid-result? #(pos? (count (:data %)))
-    :run!          #(eacl/read-relationships
-                      client
-                     (merge
-                      {:subject/type :user}
-                      (page-options 20)))}])
+    :valid-result? #(and (= 20 (count (get-in % [:page :data])))
+                         (pos? (get-in % [:total :count])))
+    :run!
+    #(let [query       {:resource     (seed/->platform "platform")
+                        :permission   :view
+                        :subject/type :user}
+           page-query  (merge query (page-options 20))
+           count-query (merge query (select-keys page-query [:cache?]))]
+       {:page (eacl/lookup-subjects
+               client
+               page-query)
+        :total (eacl/count-subjects
+                client
+                count-query)})}])
 
 (defn benchmark-workload!
   "Runs one named workload. Keeping workloads independently callable also

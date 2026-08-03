@@ -155,6 +155,7 @@
          (fn [app]
            (-> app
                normalize-ui
+               (assoc-in [:ui :user-page] nil)
                (update :db-rev (fnil inc 0)))))
   (when (ready?)
     (invalidate-child-sections!)
@@ -693,13 +694,15 @@
   [enabled?]
   (let [enabled?' (true? enabled?)]
     (when (not= enabled?' (explorer/cache-enabled? @!app))
-      (update-ui! #(assoc % :cache-enabled? enabled?'))
+      (update-ui! #(assoc % :cache-enabled? enabled?'
+                           :user-page nil))
       (refresh-query-results!))))
 
 (defn clear-cache!
   []
   (when-let [acl (client)]
     (eacl-datascript/expire-cache! acl))
+  (update-ui! #(assoc % :user-page nil))
   (refresh-query-results!))
 
 (defn select-subject!
@@ -734,9 +737,36 @@
       (start-count-jobs!)
       (restart-expanded-child-section-jobs!))))
 
-(defn set-user-page!
-  [page]
-  (update-ui! #(assoc % :user-page (max 0 page))))
+(defn first-user-page!
+  []
+  (update-ui! #(assoc % :user-page nil)))
+
+(defn prev-user-page!
+  [cursor-token]
+  (when cursor-token
+    (update-ui!
+     (fn [ui]
+       (assoc ui :user-page
+              {:page-number
+               (max 1
+                    (dec
+                     (get-in ui [:user-page :page-number] 1)))
+               :page-options
+               {:last explorer/user-page-size
+                :before cursor-token}})))))
+
+(defn next-user-page!
+  [cursor-token]
+  (when cursor-token
+    (update-ui!
+     (fn [ui]
+       (assoc ui :user-page
+              {:page-number
+               (inc
+                (get-in ui [:user-page :page-number] 1))
+               :page-options
+               {:first explorer/user-page-size
+                :after cursor-token}})))))
 
 (defn set-seed-size!
   [value]
@@ -895,7 +925,7 @@
         (letfn [(finish! [status extra]
                   (when (and (= status :ready)
                              (nil? (:seed-error extra)))
-                    (update-ui! #(assoc % :user-page 0)))
+                    (update-ui! #(assoc % :user-page nil)))
                   (set-bootstrap-state!
                    (merge {:status            status
                            :totals            (seed/current-totals (d/db conn))

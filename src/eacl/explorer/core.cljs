@@ -317,11 +317,11 @@
       [:div.pagination-row
        [:button.pagination-button
         {:disabled (not (:has-prev? user-page))
-         :on-click #(app-state/set-user-page! (dec (:page user-page)))}
+         :on-click #(app-state/prev-user-page! (:previous-cursor user-page))}
         "Prev"]
        [:button.pagination-button
         {:disabled (not (:has-next? user-page))
-         :on-click #(app-state/set-user-page! (inc (:page user-page)))}
+         :on-click #(app-state/next-user-page! (:next-cursor user-page))}
         "Next"]]
       (if (seq (:items user-page))
         [:div.list-stack
@@ -542,11 +542,13 @@
         "Loading detail..."))]])
 
 (defn- subject-view-state
-  [subject-id permission user-page db-rev]
+  [subject-id permission user-page db-rev query-rev cache-enabled?]
   {:ui {:subject-id subject-id
         :permission permission
-        :user-page  user-page}
-   :db-rev db-rev})
+        :user-page  user-page
+        :cache-enabled? cache-enabled?}
+   :db-rev db-rev
+   :query-rev query-rev})
 
 (defn- group-view-state
   [resource-type subject-id permission group-expanded group-page
@@ -617,10 +619,16 @@
                                   (update :type explorer/normalize-resource-type))
         user-page     (rum/react (rum/cursor-in app-state/!app [:ui :user-page]))
         db-rev        (rum/react (rum/cursor-in app-state/!app [:db-rev]))
-        view-state    (assoc (subject-view-state subject-id permission user-page db-rev)
+        query-rev     (rum/react (rum/cursor-in app-state/!app [:query-rev]))
+        cache-enabled? (boolean
+                        (rum/react
+                         (rum/cursor-in app-state/!app [:ui :cache-enabled?])))
+        view-state    (assoc (subject-view-state subject-id permission user-page db-rev
+                                                query-rev cache-enabled?)
                         :ui {:subject-id        subject-id
                              :permission        permission
                              :user-page         user-page
+                             :cache-enabled?    cache-enabled?
                              :selected-resource selected-resource})
         subject-data  (explorer/paged-known-users db nil acl view-state)]
     (subject-panel {:current-subject subject-id

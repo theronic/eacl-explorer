@@ -32,7 +32,7 @@
                         [?account :account/name _]]
                  db)))
         (is (= (:users (seed/profile-totals :smoke))
-               (count (seed/known-user-ids db))))
+               (:users (seed/current-totals db))))
         (is (= 2 (count (:data account-page))))
         (is (= 8 (count (:data account-view-page))))
         (is (= 20 (count (:data server-page))))
@@ -71,7 +71,14 @@
       (is (= 1 (:seed/next-account-n seed-state)))
       (is (= 0 (:seed/seed-runs seed-state)))
       (is (= ["super-user" "user-1" "user-2"]
-             (seed/known-user-ids db)))
+             (mapv :id
+                   (:data
+                    (eacl/lookup-subjects
+                     client
+                     {:resource     (seed/->platform "platform")
+                      :permission   :view
+                      :subject/type :user
+                      :first        20})))))
       (is (= 1 (count (:data (eacl/read-relationships client
                                {:subject/type      :user
                                 :subject/id        "super-user"
@@ -83,6 +90,17 @@
                             [?server :server/name _]]
                      db)
                      0))))))
+
+(deftest nested-teams-exercise-recursive-permission-inheritance
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [client]}]
+      (let [leader (seed/->user "leader-0001-01")]
+        (is (true? (eacl/can? client leader :admin
+                              (seed/->team "team-0001-03"))))
+        (is (true? (eacl/can? client leader :view
+                              (seed/->server "server-0001-0003"))))
+        (is (false? (eacl/can? client leader :admin
+                               (seed/->team "team-0002-01"))))))))
 
 (deftest shared-runtime-reuses-browser-connection-while-create-runtime-stays-isolated
   (let [shared-1 seed/shared-runtime

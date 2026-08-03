@@ -383,7 +383,10 @@
         "definition user {}
 
          definition platform {
+           relation user: user
            relation super_admin: user
+
+           permission view = user
          }
 
          definition account {
@@ -396,9 +399,10 @@
 
          definition team {
            relation account: account
+           relation parent: team
            relation leader: user
 
-           permission admin = account->admin + leader
+           permission admin = account->admin + leader + parent->admin
            permission view = admin
          }
 

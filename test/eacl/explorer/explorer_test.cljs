@@ -62,9 +62,23 @@
   (support/with-test-runtime* :smoke
     (fn [{:keys [conn client]}]
       (let [db                 (d/db conn)
-            page-1             (explorer/paged-known-users db nil client (app-state {:user-page 0}))
-            page-2             (explorer/paged-known-users db nil client (app-state {:user-page 1}))
-            page-3             (explorer/paged-known-users db nil client (app-state {:user-page 2}))
+            page-1             (explorer/paged-known-users db nil client (app-state {}))
+            page-2             (explorer/paged-known-users
+                                db nil client
+                                (app-state
+                                 {:user-page
+                                  {:page-number 2
+                                   :page-options
+                                   {:first explorer/user-page-size
+                                    :after (:next-cursor page-1)}}}))
+            page-3             (explorer/paged-known-users
+                                db nil client
+                                (app-state
+                                 {:user-page
+                                  {:page-number 3
+                                   :page-options
+                                   {:first explorer/user-page-size
+                                    :after (:next-cursor page-2)}}}))
             expected-page-2    (min explorer/user-page-size
                                     (max 0 (- (:total page-1) explorer/user-page-size)))
             expected-page-3    (min explorer/user-page-size
@@ -76,38 +90,60 @@
         (is (= 1 (:page-start page-1)))
         (is (= 21 (:page-start page-2)))
         (is (= 41 (:page-start page-3)))
+        (is (string? (:next-cursor page-1)))
+        (is (string? (:previous-cursor page-2)))
         (is (:has-next? page-1))
         (is (:has-next? page-2))
         (is (not (:has-next? page-3)))
         (is (string? (explorer/human-duration (:time page-1))))
         (is (not= (:items page-1) (:items page-2)))))))
 
-(deftest known-user-directory-prioritizes-owners-and-shared-admins-after-seeding
+(deftest known-user-directory-includes-every-registered-role
   (let [{:keys [conn client]} (seed/create-runtime)]
     (seed/install-foundation! conn client)
     (doseq [batch (:batches (seed/seed-more-plan (d/db conn) 4500))]
       (seed/execute-batch! conn client batch))
     (let [db      (d/db conn)
-          page-1  (explorer/paged-known-users db nil client (app-state {:user-page 0}))
+          page-1  (explorer/paged-known-users db nil client (app-state {}))
           items   (:items page-1)]
       (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
       (is (< (.indexOf items "owner-0001")
              (.indexOf items "leader-0001-01")))
-      (is (< (.indexOf items "shared-admin-0001-01")
-             (.indexOf items "leader-0001-01"))))))
+      (is (some #{"shared-admin-0001-01"} items))
+      (is (some #{"leader-0001-01"} items)))))
 
-(deftest known-user-directory-does-not-traverse-relationships
+(deftest known-user-directory-uses-eacl-and-follows-the-cache-toggle
   (let [{:keys [conn client]} (seed/create-runtime)]
     (seed/install-foundation! conn client)
     (doseq [batch (:batches (seed/seed-more-plan (d/db conn) 4500))]
       (seed/execute-batch! conn client batch))
-    (with-redefs [eacl/read-relationships
-                  (fn [& _]
-                    (throw (ex-info "Known-user rendering traversed EACL relationships." {})))]
-      (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
-        (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
-        (is (some #{"owner-0001"} items))
-        (is (some #{"shared-admin-0001-01"} items))))))
+    (let [lookup-queries (atom [])
+          count-queries  (atom [])
+          lookup-subjects eacl/lookup-subjects
+          count-subjects  eacl/count-subjects]
+      (with-redefs [eacl/lookup-subjects
+                    (fn [acl query]
+                      (swap! lookup-queries conj query)
+                      (lookup-subjects acl query))
+                    eacl/count-subjects
+                    (fn [acl query]
+                      (swap! count-queries conj query)
+                      (count-subjects acl query))]
+        (let [uncached (explorer/paged-known-users
+                        (d/db conn) nil client (app-state {}))
+              cached   (explorer/paged-known-users
+                        (d/db conn) nil client
+                        (app-state {:cache-enabled? true}))]
+          (is (= (:items uncached) (:items cached)))
+          (is (= [false true] (mapv :cache? @lookup-queries)))
+          (is (= [false true] (mapv :cache? @count-queries)))
+          (is (= [:platform :platform]
+                 (mapv (comp :type :resource) @lookup-queries)))
+          (is (= ["platform" "platform"]
+                 (mapv (comp :id :resource) @lookup-queries)))
+          (is (= [:view :view] (mapv :permission @lookup-queries)))
+          (is (every? #(not-any? % [:first :last :after :before])
+                      @count-queries)))))))
 
 (deftest resource-columns-render-against-foundation-only-runtime
   (let [{:keys [conn client]} (seed/create-runtime)]
@@ -318,7 +354,10 @@
         "definition user {}
 
          definition platform {
+           relation user: user
            relation super_admin: user
+
+           permission view = user
          }
 
          definition account {
@@ -331,9 +370,10 @@
 
          definition team {
            relation account: account
+           relation parent: team
            relation leader: user
 
-           permission admin = account->admin + leader
+           permission admin = account->admin + leader + parent->admin
            permission view = admin
          }
 
@@ -378,7 +418,10 @@
         "definition user {}
 
          definition platform {
+           relation user: user
            relation super_admin: user
+
+           permission view = user
          }
 
          definition account {
@@ -391,9 +434,10 @@
 
          definition team {
            relation account: account
+           relation parent: team
            relation leader: user
 
-           permission admin = account->admin + leader
+           permission admin = account->admin + leader + parent->admin
            permission view = admin
          }
 
