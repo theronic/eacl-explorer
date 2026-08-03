@@ -13,8 +13,6 @@
   [{:id "super-user" :label "Super User"}
    {:id "user-1" :label "User 1"}
    {:id "user-2" :label "User 2"}])
-(def quick-subject-order
-  (zipmap (map :id quick-subjects) (range)))
 
 (def resource-page-size 20)
 (def user-page-size 20)
@@ -101,10 +99,11 @@
    :selected-resource      nil
    :user-page              0
    :group-expanded         #{}
-   :group-prev             {}
+   :group-pages            {}
    :expanded-resource-keys #{}
    :expanded-section-keys  #{}
    :nested-prev            {}
+   :cache-enabled?         false
    :schema-expanded?       false
    :schema-draft           seed/multipath-schema-dsl
    :seed-size-input        (str seed/default-seed-size)})
@@ -150,6 +149,11 @@
               (:permission state))
           normalize-permission-name))
 
+(defn cache-enabled?
+  [state]
+  (true? (or (get-in state [:ui :cache-enabled?])
+             (:cache-enabled? state))))
+
 (defn selected-resource
   [state]
   (some-> (or (get-in state [:ui :selected-resource])
@@ -163,19 +167,20 @@
                  #{})
     resource-type))
 
-(defn group-cursors
+(defn group-page
   [state resource-type]
-  (vec (or (get-in state [:ui :group-prev resource-type])
-           (get-in state [:group-prev resource-type])
-           [])))
+  (or (get-in state [:ui :group-pages resource-type])
+      (get-in state [:group-pages resource-type])
+      {:page-number 1
+       :page-options {:first resource-page-size}}))
 
 (defn group-page-number
   [state resource-type]
-  (inc (count (group-cursors state resource-type))))
+  (:page-number (group-page state resource-type)))
 
-(defn current-group-cursor
+(defn group-page-options
   [state resource-type]
-  (peek (group-cursors state resource-type)))
+  (:page-options (group-page state resource-type)))
 
 (defn forward-page-options
   [page-size cursor-token]
@@ -186,6 +191,11 @@
   [{:keys [page-info]}]
   (when (:has-next-page? page-info)
     (:end-cursor page-info)))
+
+(defn previous-page-cursor
+  [{:keys [page-info]}]
+  (when (:has-previous-page? page-info)
+    (:start-cursor page-info)))
 
 (defn resource-key
   [{:keys [type id]}]
@@ -228,24 +238,6 @@
 (defn current-child-group-cursor
   [state section-key]
   (peek (child-group-cursors state section-key)))
-
-(defn- user-sort-key
-  [user-id]
-  (cond
-    (contains? quick-subject-order user-id)
-    [0 (get quick-subject-order user-id) user-id]
-
-    (str/starts-with? user-id "owner-")
-    [1 0 user-id]
-
-    (str/starts-with? user-id "shared-admin-")
-    [2 0 user-id]
-
-    (str/starts-with? user-id "leader-")
-    [3 0 user-id]
-
-    :else
-    [4 0 user-id]))
 
 (defn- permission-sort-key
   [permission]
@@ -524,40 +516,16 @@
        sort-resources))
 
 (defn- known-user-id-stream
-  [db acl]
-  (->> (concat
-        (when acl
-          (loop [cursor-token nil
-                 seen-cursors #{}
-                 relationships []]
-            (let [{:keys [data] :as page}
-                  (eacl/read-relationships
-                   acl
-                   (merge {:subject/type :user}
-                          (forward-page-options user-page-size cursor-token)))
-                  cursor         (next-page-cursor page)
-                  relationships' (into relationships data)
-                  repeated?      (or (nil? cursor)
-                                     (contains? seen-cursors cursor))]
-              (if-not repeated?
-                (recur cursor
-                       (conj seen-cursors cursor)
-                       relationships')
-                (map (comp :id :subject) relationships')))))
-        (keep (fn [{:keys [id]}]
-                (when (d/entid db [:eacl/id id])
-                  id))
-              quick-subjects))
-       distinct
-       (sort-by user-sort-key)))
+  [db]
+  (seed/known-user-ids db))
 
 (defn paged-known-users
-  [db _client acl state]
+  [db _client _acl state]
   (let [requested-page (max 0 (long (or (get-in state [:ui :user-page])
                                         (:user-page state)
                                         0)))
         started-at     (now-nanos)
-        all-users      (vec (known-user-id-stream db acl))
+        all-users      (known-user-id-stream db)
         total          (count all-users)
         max-page       (max 0 (long (quot (max 0 (dec total)) user-page-size)))
         effective-page (min requested-page max-page)
@@ -580,7 +548,9 @@
     (try
       (let [{:keys [data] :as result}
             (eacl/lookup-resources acl
-              (assoc query :consistency consistency/fully-consistent))]
+              (assoc query
+                     :cache? (true? (:cache? query))
+                     :consistency consistency/fully-consistent))]
         (assoc result
           :items (hydrate-objects db data)
           :time  (- (now-nanos) started-at)))
@@ -596,7 +566,9 @@
   (let [started-at (now-nanos)]
     (try
       (let [result (eacl/count-resources acl
-                     (assoc query :consistency consistency/fully-consistent))]
+                     (assoc query
+                            :cache? (true? (:cache? query))
+                            :consistency consistency/fully-consistent))]
         (assoc result :time (- (now-nanos) started-at)))
       (catch :default ex
         {:count  0
@@ -633,10 +605,9 @@
                             (merge
                              {:subject       (seed/->user (current-subject-id state))
                               :permission    permission
-                              :resource/type resource-type}
-                             (forward-page-options
-                              resource-page-size
-                              (current-group-cursor state resource-type))))
+                              :resource/type resource-type
+                              :cache?        (cache-enabled? state)}
+                             (group-page-options state resource-type)))
                item-count (count (:items result))
                start      (if (pos? item-count)
                             (inc (* resource-page-size (dec (group-page-number state resource-type))))
@@ -645,12 +616,14 @@
             :page-end    (+ (max 0 (dec start)) item-count)
             :items       (:items result)
             :next-cursor (next-page-cursor result)
+            :previous-cursor (previous-page-cursor result)
             :error       (:error result)
             :time        (:time result)})
          {:page-start  0
           :page-end    0
           :items       []
           :next-cursor nil
+          :previous-cursor nil
           :time        nil})))))
 
 (declare build-resource-node)
@@ -813,6 +786,7 @@
                              {:resource     resource-ref
                               :permission   permission
                               :subject/type :user
+                              :cache?        (cache-enabled? state)
                               :consistency  consistency/fully-consistent})]
                        {:permission permission
                         :subjects   (->> data

@@ -243,15 +243,17 @@
          (when-let [error (:error group)]
            [:span.tree-meta__error error])]
         [:div.pagination-row
-        [:button.pagination-button
+         [:button.pagination-button
           {:on-click #(app-state/first-group-page! resource-type)
            :disabled (or (not (:supported? group))
                          (= 1 (:page-number group)))}
           "First"]
          [:button.pagination-button
-          {:on-click #(app-state/prev-group-page! resource-type)
+          {:on-click #(app-state/prev-group-page!
+                       resource-type
+                       (:previous-cursor group))
            :disabled (or (not (:supported? group))
-                         (= 1 (:page-number group)))}
+                         (nil? (:previous-cursor group)))}
           "Prev"]
          [:button.pagination-button
           {:on-click #(app-state/next-group-page! resource-type (:next-cursor group))
@@ -459,7 +461,7 @@
        [:div#schema-graph-canvas.graph-canvas]]])])
 
 (defn- shell-header
-  [bootstrap seed-size-input]
+  [bootstrap seed-size-input cache-enabled?]
   (let [stat   (explorer/server-stat-data {:bootstrap bootstrap})
         status (:status bootstrap :booting)]
     [:header.app-header
@@ -485,6 +487,20 @@
          :rel "noreferrer"}
         "Explorer Source"]]
       [:div.app-header__controls
+       [:div.cache-controls
+        [:label.cache-toggle
+         [:input.cache-toggle__input
+          {:type      "checkbox"
+           :checked   (boolean cache-enabled?)
+           :disabled  (not= :ready status)
+           :on-change #(app-state/set-cache-enabled!
+                        (.. % -target -checked))}]
+         [:span "Cache"]]
+        [:button.graph-toggle.cache-clear
+         {:type     "button"
+          :disabled (not= :ready status)
+          :on-click #(app-state/clear-cache!)}
+         "Clear Cache"]]
        [:div.stat-host (server-stat-node stat)]
        [:form.seed-controls
         {:on-submit (fn [event]
@@ -533,33 +549,41 @@
    :db-rev db-rev})
 
 (defn- group-view-state
-  [resource-type subject-id permission group-expanded group-cursors
-   expanded-resource-keys expanded-section-keys nested-prev count-entry child-sections db-rev]
+  [resource-type subject-id permission group-expanded group-page
+   expanded-resource-keys expanded-section-keys nested-prev count-entry child-sections
+   db-rev query-rev cache-enabled?]
   {:ui {:subject-id             subject-id
         :permission             permission
+        :cache-enabled?         cache-enabled?
         :group-expanded         (if (contains? group-expanded resource-type)
                                   #{resource-type}
                                   #{})
-        :group-prev             {resource-type (vec (or group-cursors []))}
+        :group-pages            {resource-type group-page}
         :expanded-resource-keys expanded-resource-keys
         :expanded-section-keys  expanded-section-keys
         :nested-prev            nested-prev}
    :counts {resource-type count-entry}
    :child-sections child-sections
-   :db-rev db-rev})
+   :db-rev db-rev
+   :query-rev query-rev})
 
 (defn- detail-view-state
-  [subject-id permission selected-resource db-rev]
+  [subject-id permission selected-resource db-rev query-rev cache-enabled?]
   {:ui {:subject-id        subject-id
         :permission        permission
+        :cache-enabled?    cache-enabled?
         :selected-resource selected-resource}
-   :db-rev db-rev})
+   :db-rev db-rev
+   :query-rev query-rev})
 
 (rum/defcs shell-header-view < rum/reactive
   [rum-state]
   (let [bootstrap    (rum/react (rum/cursor-in app-state/!app [:bootstrap]))
-        seed-size-input (rum/react (rum/cursor-in app-state/!app [:ui :seed-size-input]))]
-    (shell-header bootstrap seed-size-input)))
+        seed-size-input (rum/react (rum/cursor-in app-state/!app [:ui :seed-size-input]))
+        cache-enabled? (boolean
+                        (rum/react
+                         (rum/cursor-in app-state/!app [:ui :cache-enabled?])))]
+    (shell-header bootstrap seed-size-input cache-enabled?)))
 
 (rum/defcs schema-shell-view < rum/reactive
   [rum-state]
@@ -613,26 +637,32 @@
         permission             (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
                                        explorer/normalize-permission-name)
         group-expanded         (rum/react (rum/cursor-in app-state/!app [:ui :group-expanded]))
-        group-cursors          (rum/react (rum/cursor-in app-state/!app [:ui :group-prev resource-type]))
+        group-page             (rum/react (rum/cursor-in app-state/!app [:ui :group-pages resource-type]))
         expanded-resource-keys (rum/react (rum/cursor-in app-state/!app [:ui :expanded-resource-keys]))
         expanded-section-keys  (rum/react (rum/cursor-in app-state/!app [:ui :expanded-section-keys]))
         nested-prev            (rum/react (rum/cursor-in app-state/!app [:ui :nested-prev]))
         count-entry            (rum/react (rum/cursor-in app-state/!app [:counts resource-type]))
         child-sections         (rum/react (rum/cursor-in app-state/!app [:child-sections]))
+        cache-enabled?         (boolean
+                                (rum/react
+                                 (rum/cursor-in app-state/!app [:ui :cache-enabled?])))
         selected-resource      (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
                                        (update :type explorer/normalize-resource-type))
         db-rev                 (rum/react (rum/cursor-in app-state/!app [:db-rev]))
+        query-rev              (or (rum/react (rum/cursor-in app-state/!app [:query-rev])) 0)
         view-state             (group-view-state resource-type
                                  subject-id
                                  permission
                                  group-expanded
-                                 group-cursors
+                                 group-page
                                  expanded-resource-keys
                                  expanded-section-keys
                                  nested-prev
                                  count-entry
                                  child-sections
-                                 db-rev)]
+                                 db-rev
+                                 query-rev
+                                 cache-enabled?)]
     (render-group selected-resource
       (explorer/group-data db acl view-state resource-type))))
 
@@ -669,8 +699,17 @@
         selected-resource (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
                                   (update :type explorer/normalize-resource-type))
         db-rev            (rum/react (rum/cursor-in app-state/!app [:db-rev]))
+        query-rev         (or (rum/react (rum/cursor-in app-state/!app [:query-rev])) 0)
+        cache-enabled?    (boolean
+                           (rum/react
+                            (rum/cursor-in app-state/!app [:ui :cache-enabled?])))
         detail-data       (assoc (explorer/resource-detail-data db acl
-                                   (detail-view-state subject-id permission selected-resource db-rev))
+                                   (detail-view-state subject-id
+                                                      permission
+                                                      selected-resource
+                                                      db-rev
+                                                      query-rev
+                                                      cache-enabled?))
                             :current-subject subject-id)]
     (detail-panel detail-data)))
 

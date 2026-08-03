@@ -2,6 +2,7 @@
   (:require [clojure.string :as str]
             [datascript.core :as d]
             [eacl.core :as eacl]
+            [eacl.datascript.core :as eacl-datascript]
             [eacl.explorer.explorer :as explorer]
             [eacl.explorer.seed :as seed]))
 
@@ -22,7 +23,8 @@
    :ui        explorer/default-ui-state
    :counts    explorer/default-count-state
    :child-sections {}
-   :db-rev    0})
+   :db-rev    0
+   :query-rev 0})
 
 (defonce !runtime (atom nil))
 (defonce !app (atom (initial-app-state)))
@@ -92,7 +94,7 @@
 (defn- reset-navigation
   [ui]
   (assoc ui
-         :group-prev {}
+         :group-pages {}
          :nested-prev {}))
 
 (defn- resource-types
@@ -125,6 +127,8 @@
 (defn- current-count-context
   [app]
   {:db-rev     (:db-rev app)
+   :query-rev  (or (:query-rev app) 0)
+   :cache?     (explorer/cache-enabled? app)
    :subject-id (explorer/current-subject-id app)
    :permission (explorer/current-permission app)})
 
@@ -204,7 +208,8 @@
                       acl
                       {:subject       (seed/->user (:subject-id context))
                        :permission    (:permission context)
-                       :resource/type resource-type})]
+                       :resource/type resource-type
+                       :cache?        (:cache? context)})]
                  (publish-count!
                   resource-type
                   job-id
@@ -234,6 +239,8 @@
 (defn- child-section-context
   [app section-key parent resource-type]
   {:db-rev        (:db-rev app)
+   :query-rev     (or (:query-rev app) 0)
+   :cache?        (explorer/cache-enabled? app)
    :subject-id    (explorer/current-subject-id app)
    :permission    (explorer/current-permission app)
    :parent-type   (:type parent)
@@ -243,7 +250,8 @@
 
 (defn- child-section-context-keys
   []
-  [:db-rev :subject-id :permission :parent-type :parent-id :resource-type :cursor-token])
+  [:db-rev :query-rev :cache? :subject-id :permission
+   :parent-type :parent-id :resource-type :cursor-token])
 
 (defn- same-child-job-context?
   [app section-key job-id context]
@@ -325,28 +333,32 @@
                           true))
 
 (defn- read-child-relationships
-  [acl parent resource-type relation-name cursor-token limit]
+  [acl parent resource-type relation-name cursor-token limit cache?]
   (eacl/read-relationships
    acl
    (merge
     {:subject/type      (:type parent)
      :subject/id        (:id parent)
      :resource/type     resource-type
-     :resource/relation relation-name}
+     :resource/relation relation-name
+     :cache?            (true? cache?)}
     (explorer/forward-page-options limit cursor-token))))
 
 (defn- resource-authorized?
-  [acl subject permission permission-implied? resource]
+  [acl subject permission permission-implied? resource cache?]
   (or permission-implied?
-      (eacl/can? acl subject permission resource)))
+      (eacl/can? acl {:subject    subject
+                      :permission permission
+                      :resource   resource
+                      :cache?     (true? cache?)})))
 
 (defn- collect-page-items
-  [acl subject permission permission-implied? existing-items relationships]
+  [acl subject permission permission-implied? existing-items relationships cache?]
   (loop [remaining relationships
          page-items existing-items
          consumed-count 0]
     (if-let [{:keys [resource]} (first remaining)]
-      (if (resource-authorized? acl subject permission permission-implied? resource)
+      (if (resource-authorized? acl subject permission permission-implied? resource cache?)
         (if (< (count page-items) explorer/resource-page-size)
           (recur (rest remaining) (conj page-items resource) (inc consumed-count))
           {:page-items page-items
@@ -364,7 +376,7 @@
     child-section-batch-size))
 
 (defn- replay-child-page-cursor
-  [acl parent resource-type relation-name cursor-token consumed-count]
+  [acl parent resource-type relation-name cursor-token consumed-count cache?]
   (when (pos? consumed-count)
     (explorer/next-page-cursor
      (read-child-relationships acl
@@ -372,7 +384,8 @@
                                resource-type
                                relation-name
                                cursor-token
-                               consumed-count))))
+                               consumed-count
+                               cache?))))
 
 (defn- launch-single-relation-total-job!
   [section-key context parent resource-type relation-name job-id permission-implied?]
@@ -388,7 +401,8 @@
                                                   resource-type
                                                   relation-name
                                                   cursor-token
-                                                  child-section-count-batch-size)
+                                                  child-section-count-batch-size
+                                                  (:cache? context))
                         next-cursor   (explorer/next-page-cursor page)
                         more-batches? (and (some? next-cursor)
                                            (not= next-cursor cursor-token))
@@ -396,7 +410,9 @@
                                          (if permission-implied?
                                            (count relationships)
                                            (reduce (fn [acc {:keys [resource]}]
-                                                     (if (eacl/can? acl subject permission resource)
+                                                     (if (resource-authorized?
+                                                          acl subject permission false
+                                                          resource (:cache? context))
                                                        (inc acc)
                                                        acc))
                                                    0
@@ -460,7 +476,8 @@
                                                   resource-type
                                                   relation-name
                                                   cursor-token
-                                                  batch-limit)
+                                                  batch-limit
+                                                  (:cache? context))
                         next-batch-cursor (explorer/next-page-cursor page)
                         more-batches?    (and (some? next-batch-cursor)
                                               (not= next-batch-cursor cursor-token))]
@@ -474,7 +491,8 @@
                                                 permission
                                                 permission-implied?
                                                 page-items
-                                                relationships)
+                                                relationships
+                                                (:cache? context))
                             next-page-cursor (cond
                                                (and page-full? (< consumed-count (count relationships)))
                                                (replay-child-page-cursor acl
@@ -482,7 +500,8 @@
                                                                          resource-type
                                                                          relation-name
                                                                          cursor-token
-                                                                         consumed-count)
+                                                                         consumed-count
+                                                                         (:cache? context))
 
                                                (and page-full? more-batches?)
                                                next-batch-cursor
@@ -523,16 +542,14 @@
                 (if-let [relation-def (first remaining-defs)]
                   (try
                     (let [{relationships :data :as page}
-                          (eacl/read-relationships
+                          (read-child-relationships
                            acl
-                           (merge
-                            {:subject/type      (:type parent)
-                             :subject/id        (:id parent)
-                             :resource/type     resource-type
-                             :resource/relation (:eacl.relation/relation-name relation-def)}
-                            (explorer/forward-page-options
-                             child-section-batch-size
-                             cursor-token)))
+                           parent
+                           resource-type
+                           (:eacl.relation/relation-name relation-def)
+                           cursor-token
+                           child-section-batch-size
+                           (:cache? context))
                           next-cursor-token (explorer/next-page-cursor page)
                           resources      (map :resource relationships)
                           [seen' authorized']
@@ -540,7 +557,9 @@
                                     (let [key' (explorer/resource-key resource)]
                                       (if (contains? seen-resources key')
                                         [seen-resources authorized-resources]
-                                        (if (eacl/can? acl subject permission resource)
+                                        (if (resource-authorized?
+                                             acl subject permission false
+                                             resource (:cache? context))
                                           [(conj seen-resources key')
                                            (conj authorized-resources resource)]
                                           [(conj seen-resources key')
@@ -662,6 +681,27 @@
     {:permission-changed? (not= before-permission
                                 (explorer/current-permission @!app))}))
 
+(defn- refresh-query-results!
+  []
+  (swap! !app update :query-rev (fnil inc 0))
+  (invalidate-child-sections!)
+  (invalidate-counts!)
+  (start-count-jobs!)
+  (restart-expanded-child-section-jobs!))
+
+(defn set-cache-enabled!
+  [enabled?]
+  (let [enabled?' (true? enabled?)]
+    (when (not= enabled?' (explorer/cache-enabled? @!app))
+      (update-ui! #(assoc % :cache-enabled? enabled?'))
+      (refresh-query-results!))))
+
+(defn clear-cache!
+  []
+  (when-let [acl (client)]
+    (eacl-datascript/expire-cache! acl))
+  (refresh-query-results!))
+
 (defn select-subject!
   [subject-id]
   (update-ui! #(-> %
@@ -716,19 +756,42 @@
 
 (defn first-group-page!
   [resource-type]
-  (update-ui! #(assoc-in % [:group-prev resource-type] [])))
+  (update-ui!
+   #(update % :group-pages dissoc resource-type)))
 
 (defn prev-group-page!
-  [resource-type]
-  (update-ui! #(update-in % [:group-prev resource-type]
-                          (fn [stack]
-                            (vec (butlast (vec stack)))))))
+  [resource-type cursor-token]
+  (when cursor-token
+    (update-ui!
+     (fn [ui]
+       (let [page-number
+             (max 1
+                  (dec
+                   (get-in ui
+                           [:group-pages resource-type :page-number]
+                           1)))]
+         (assoc-in ui
+                   [:group-pages resource-type]
+                   {:page-number page-number
+                    :page-options
+                    {:last explorer/resource-page-size
+                     :before cursor-token}}))))))
 
 (defn next-group-page!
   [resource-type cursor-token]
   (when cursor-token
-    (update-ui! #(update-in % [:group-prev resource-type]
-                            (fnil conj []) cursor-token))))
+    (update-ui!
+     (fn [ui]
+       (assoc-in ui
+                 [:group-pages resource-type]
+                 {:page-number
+                  (inc
+                   (get-in ui
+                           [:group-pages resource-type :page-number]
+                           1))
+                  :page-options
+                  {:first explorer/resource-page-size
+                   :after cursor-token}})))))
 
 (defn toggle-expanded-resource!
   [resource]

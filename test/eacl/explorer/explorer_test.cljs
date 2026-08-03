@@ -19,6 +19,45 @@
     :child-sections child-sections
     :db-rev         db-rev}))
 
+(deftest explorer-cache-is-disabled-by-default
+  (is (false? (:cache-enabled? explorer/default-ui-state)))
+  (is (false? (explorer/cache-enabled? (app-state {}))))
+  (is (true? (explorer/cache-enabled?
+              (app-state {:cache-enabled? true})))))
+
+(deftest top-level-eacl-queries-default-to-cache-off
+  (let [lookup-queries (atom [])
+        count-queries  (atom [])]
+    (with-redefs [eacl/lookup-resources
+                  (fn [_ query]
+                    (swap! lookup-queries conj query)
+                    {:data []})
+                  eacl/count-resources
+                  (fn [_ query]
+                    (swap! count-queries conj query)
+                    {:count 0})]
+      (explorer/try-lookup-resources nil :acl {})
+      (explorer/try-lookup-resources nil :acl {:cache? true})
+      (explorer/try-count-resources :acl {})
+      (explorer/try-count-resources :acl {:cache? true}))
+    (is (= [false true] (mapv :cache? @lookup-queries)))
+    (is (= [false true] (mapv :cache? @count-queries)))))
+
+(deftest resource-list-queries-follow-the-cache-toggle
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [state    {:subject-id "user-1"
+                      :group-expanded #{:server}}
+            uncached (explorer/top-level-group-data
+                      (d/db conn) client (app-state state) :server)
+            cached   (explorer/top-level-group-data
+                      (d/db conn) client
+                      (app-state (assoc state :cache-enabled? true))
+                      :server)]
+        (is (seq (:items uncached)))
+        (is (= (mapv :id (:items uncached))
+               (mapv :id (:items cached))))))))
+
 (deftest known-user-directory-pages-from-live-eacl-data
   (support/with-test-runtime* :smoke
     (fn [{:keys [conn client]}]
@@ -57,15 +96,18 @@
       (is (< (.indexOf items "shared-admin-0001-01")
              (.indexOf items "leader-0001-01"))))))
 
-(deftest known-user-directory-reads-relationships-from-client
+(deftest known-user-directory-does-not-traverse-relationships
   (let [{:keys [conn client]} (seed/create-runtime)]
     (seed/install-foundation! conn client)
     (doseq [batch (:batches (seed/seed-more-plan (d/db conn) 4500))]
       (seed/execute-batch! conn client batch))
-    (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
-      (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
-      (is (some #{"owner-0001"} items))
-      (is (some #{"shared-admin-0001-01"} items)))))
+    (with-redefs [eacl/read-relationships
+                  (fn [& _]
+                    (throw (ex-info "Known-user rendering traversed EACL relationships." {})))]
+      (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
+        (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
+        (is (some #{"owner-0001"} items))
+        (is (some #{"shared-admin-0001-01"} items))))))
 
 (deftest resource-columns-render-against-foundation-only-runtime
   (let [{:keys [conn client]} (seed/create-runtime)]
@@ -93,13 +135,35 @@
                                                          (app-state {:subject-id     "user-1"
                                                                      :permission     :view
                                                                      :group-expanded #{:server}
-                                                                     :group-prev     {:server [next-cursor]}}))
+                                                                     :group-pages
+                                                                     {:server
+                                                                      {:page-number 2
+                                                                       :page-options
+                                                                       {:first 20
+                                                                        :after next-cursor}}}}))
             server-group-2 (some #(when (= :server (:resource-type %)) %) second-page)
-            page-2-ids     (mapv :id (:items server-group-2))]
+            page-2-ids     (mapv :id (:items server-group-2))
+            previous-cursor (:previous-cursor server-group-2)
+            previous-page  (explorer/resource-panel-data
+                            db client
+                            (app-state
+                             {:subject-id     "user-1"
+                              :permission     :view
+                              :group-expanded #{:server}
+                              :group-pages
+                              {:server
+                               {:page-number 1
+                                :page-options
+                                {:last 20
+                                 :before previous-cursor}}}}))
+            previous-group (some #(when (= :server (:resource-type %)) %)
+                                 previous-page)]
         (is (string? next-cursor))
+        (is (string? previous-cursor))
         (is (= 20 (count page-1-ids)))
         (is (= 20 (count page-2-ids)))
-        (is (empty? (set/intersection (set page-1-ids) (set page-2-ids))))))))
+        (is (empty? (set/intersection (set page-1-ids) (set page-2-ids))))
+        (is (= page-1-ids (mapv :id (:items previous-group))))))))
 
 (deftest nested-resource-groups-render-from-live-child-section-state
   (support/with-test-runtime* :smoke
@@ -208,6 +272,28 @@
         (is (= "server-0001-0001" (get-in details [:resource :id])))
         (is (= :server (get-in details [:resource :type])))
         (is (seq (:permissions details)))))))
+
+(deftest detail-eacl-queries-follow-the-cache-toggle
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [queries (atom [])
+            state   {:selected-resource {:type :server :id "server-0001-0001"}
+                     :subject-id "user-1"}]
+        (with-redefs [eacl/lookup-subjects
+                      (fn [_ query]
+                        (swap! queries conj query)
+                        {:data []})]
+          (explorer/resource-detail-data
+           (d/db conn) client (app-state state))
+          (let [uncached-query-count (count @queries)]
+            (is (pos? uncached-query-count))
+            (is (every? false? (map :cache? @queries)))
+            (reset! queries [])
+            (explorer/resource-detail-data
+             (d/db conn) client
+             (app-state (assoc state :cache-enabled? true)))
+            (is (= uncached-query-count (count @queries)))
+            (is (every? true? (map :cache? @queries)))))))))
 
 (deftest schema-panel-data-includes-source-and-permission-nodes
   (support/with-test-runtime* :smoke

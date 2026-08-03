@@ -6,10 +6,11 @@
             [goog.string :as gstring]
             [goog.string.format]))
 
-(def seed-version 3)
+(def seed-version 4)
 (def seed-marker-id "eacl-explorer/seed-state")
 (def root-user-count 3)
 (def default-seed-size 10000)
+(def user-directory-attr :eacl.explorer/user-order+id)
 
 (def benchmark-seed-shape
   {:accounts-per-batch     2
@@ -50,6 +51,7 @@
    :team/name         {:db/index true}
    :vpc/name          {:db/index true}
    :server/name       {:db/index true}
+   user-directory-attr {:db/index true}
    :seed/profile      {:db/index true}
    :seed/version      {}
    :seed/total-accounts {}
@@ -69,6 +71,21 @@
 (def ->platform (partial spice-object :platform))
 (def ->account (partial spice-object :account))
 (def ->vpc (partial spice-object :vpc))
+
+(defn- user-directory-entity
+  [user-id order]
+  {:eacl/id user-id
+   user-directory-attr [order user-id]})
+
+(defn known-user-ids
+  "Returns the Explorer's explicitly registered users in display order.
+
+  The directory is an Explorer concern, not an authorization query. Keeping a
+  compact ordered value in AVET makes its cost depend only on the user count,
+  without traversing or cursor-windowing the relationship graph."
+  [db]
+  (->> (d/datoms db :avet user-directory-attr)
+       (mapv (comp second :v))))
 
 (defn create-conn
   []
@@ -229,12 +246,9 @@
    :entity-count 4
    :tx-data      [{:db/id   -1
                    :eacl/id "platform"}
-                  {:db/id   -2
-                   :eacl/id "super-user"}
-                  {:db/id   -3
-                   :eacl/id "user-1"}
-                  {:db/id   -4
-                   :eacl/id "user-2"}]})
+                  (assoc (user-directory-entity "super-user" 0) :db/id -2)
+                  (assoc (user-directory-entity "user-1" 0) :db/id -3)
+                  (assoc (user-directory-entity "user-2" 0) :db/id -4)]})
 
 (defn- root-relationships-batch
   []
@@ -258,16 +272,16 @@
                        (concat
                         [{:eacl/id      (:id account)
                           :account/name (:name account)}
-                         {:eacl/id owner-id}]
+                         (user-directory-entity owner-id 1)]
                         (mapcat (fn [{:keys [id leader-id name]}]
                                   [{:eacl/id id
                                     :team/name name}
-                                   {:eacl/id leader-id}])
+                                   (user-directory-entity leader-id 3)])
                           teams)
                         (mapcat (fn [{:keys [id shared-admin-id name]}]
                                   [{:eacl/id id
                                     :vpc/name name}
-                                   {:eacl/id shared-admin-id}])
+                                   (user-directory-entity shared-admin-id 2)])
                           vpcs)))
                      layouts))
    :relationships (vec
@@ -452,12 +466,9 @@
    (d/transact! conn
      [{:db/id   -1
        :eacl/id "platform"}
-      {:db/id   -2
-       :eacl/id "super-user"}
-      {:db/id   -3
-       :eacl/id "user-1"}
-      {:db/id   -4
-       :eacl/id "user-2"}
+      (assoc (user-directory-entity "super-user" 0) :db/id -2)
+      (assoc (user-directory-entity "user-1" 0) :db/id -3)
+      (assoc (user-directory-entity "user-2" 0) :db/id -4)
       (merge {:db/id -5
               :eacl/id seed-marker-id
               :seed/next-account-n 1

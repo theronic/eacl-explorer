@@ -12,6 +12,8 @@ Measured on 2026-08-02 in Chromium with freshly seeded Explorer runtimes.
   `bb69a6bd17252bad6d9f2aacdd65a70cb9832c50`.
 - PR-#96 runtime: EACL v8 at
   `73c5488ce35f949f471670f115b5fdccea4b1ec2`.
+- Final PR-#97 runtime: EACL v8 at
+  `599bdd177b42368ac0d17213f50eb53b292c037c`.
 - Dataset: 5 accounts, 20 teams, 10 VPCs, 10,000 servers, and 38 users.
 - Each workload receives 20 warm-up calls followed by 30 measured samples.
 - Fast workloads are batched within each sample to improve timer resolution.
@@ -30,6 +32,76 @@ Measured on 2026-08-02 in Chromium with freshly seeded Explorer runtimes.
 
 The v7 and v8 page sizes are identical. Only their public pagination syntax
 differs: v7 uses `:limit`; v8 uses Relay `:first`.
+
+## Relay cache-hit overhead fix
+
+The first PR-#97 revision,
+`34286ca5b3aaa0c4dc9277d600b6efe110d69f1a`, made an authenticated
+continuation cacheable when cursor selection retained the current immutable
+snapshot. That removed recursive engine execution on a hit, but did not remove
+the dominant browser cost.
+
+Profiling showed that EACL still authenticated a continuation twice, rebuilt
+current and cursor snapshot proofs twice, rebuilt the same page proof for both
+boundary cursors, and re-canonicalized and authenticated both output cursors on
+every hit. The cache lookup itself took about 0.07 ms; this surrounding
+cursor-proof work accounted for almost all of the remaining 8–17 ms.
+
+Commit `599bdd177b42368ac0d17213f50eb53b292c037c` now:
+
+- authenticates and internalizes each continuation once;
+- builds one immutable proof context for both output cursors;
+- memoizes non-expiring client-minted cursor codecs inside EACL;
+- learns a snapshot-scoped opposite-direction alias when adjacent pages are
+  visited, so the first Back/Forward traversal reuses the page already computed.
+
+The Explorer stores only the Relay request and page number. It does not cache
+query results. Next sends `first/after`, Prev sends `last/before`, and First
+resets to a cursor-free `first` request.
+
+The direct EACL comparison uses a freshly seeded 10,000-server runtime,
+`super-user`, `:view`, page size 20. Post-fix distributions use 50 samples of
+10 invocations:
+
+| Path | Before final fix | After final fix | Reduction |
+| --- | ---: | ---: | ---: |
+| Warm first page, mean | 9.059 ms | 0.638 ms | 93.0% |
+| Warm continuation, mean | 16.864 ms | 0.905 ms | 94.6% |
+
+The post-fix p50/p95 values are 0.590/0.970 ms for the first page,
+0.900/1.000 ms for the continuation, and 0.830/0.970 ms for the reverse alias.
+
+Through the real development UI, a cold first page took 10.7 ms, the first Back
+to a visited page took 2.8 ms, and Forward to that visited page took 2.9 ms.
+Before the alias fix, the first Back took 21.1 ms because the equivalent
+`last/before` request had a different semantic cache key.
+
+For context, one observed hosted-v7 first page took 15.1 ms. Count remained
+comparable at 82.8 ms in the final local v8 runtime and 86.3 ms in hosted v7;
+count does not perform Relay cursor work.
+
+### Why formal verification did not detect the regression
+
+The verification boundary proves the values of selected pure decisions. It
+does not prove latency or a bound on duplicated work:
+
+- performance is explicitly excluded by
+  `formal/verification/trusted-boundary.md`;
+- crypto and canonicalization are treated as trusted-boundary axioms;
+- `formal/verification/final-assurance-audit.md` records that the whole public
+  engine is not generated-authoritative, and Explorer uses the default
+  `:legacy-authoritative` mode;
+- the pagination performance gate models primarily Datomic traversal with the
+  completed cache disabled;
+- the cache performance case measures `can?`, not DataScript/CLJS Relay lookup;
+- normal CI checks only that the performance-gate EDN is numerically
+  well-formed, while benchmark-tagged tests are excluded.
+
+Recomputing a proof and reusing it have the same semantic output, so the
+existing theorem cannot distinguish them. PR #97 adds deterministic
+normal-suite checks for the missing work invariants: one cursor authentication,
+one page proof-context build, one encode per unique client-owned cursor, and an
+immediate reverse-page cache hit.
 
 ## PR #96 upgrade verification
 
@@ -107,7 +179,7 @@ reuse and removing the relationship cursor's complete-result digest.
 ### Correctness checks
 
 - Both Explorer browser builds compile with zero warnings.
-- The four Explorer browser test namespaces pass: 36 tests, 174 assertions,
+- The four Explorer browser test namespaces pass: 37 tests, 179 assertions,
   zero failures and zero errors.
 - The same compile and test results hold after upgrading to PR #96.
 - Every benchmark sample validates its semantic result: the expected allow or
