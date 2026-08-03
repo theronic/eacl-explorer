@@ -31,6 +31,8 @@
                         :where
                         [?account :account/name _]]
                  db)))
+        (is (= (:users (seed/profile-totals :smoke))
+               (count (seed/known-user-ids db))))
         (is (= 2 (count (:data account-page))))
         (is (= 8 (count (:data account-view-page))))
         (is (= 20 (count (:data server-page))))
@@ -68,6 +70,8 @@
       (is (= seed/empty-totals (seed/current-totals db)))
       (is (= 1 (:seed/next-account-n seed-state)))
       (is (= 0 (:seed/seed-runs seed-state)))
+      (is (= ["super-user" "user-1" "user-2"]
+             (seed/known-user-ids db)))
       (is (= 1 (count (:data (eacl/read-relationships client
                                {:subject/type      :user
                                 :subject/id        "super-user"

@@ -13,8 +13,6 @@
   [{:id "super-user" :label "Super User"}
    {:id "user-1" :label "User 1"}
    {:id "user-2" :label "User 2"}])
-(def quick-subject-order
-  (zipmap (map :id quick-subjects) (range)))
 
 (def resource-page-size 20)
 (def user-page-size 20)
@@ -234,24 +232,6 @@
 (defn current-child-group-cursor
   [state section-key]
   (peek (child-group-cursors state section-key)))
-
-(defn- user-sort-key
-  [user-id]
-  (cond
-    (contains? quick-subject-order user-id)
-    [0 (get quick-subject-order user-id) user-id]
-
-    (str/starts-with? user-id "owner-")
-    [1 0 user-id]
-
-    (str/starts-with? user-id "shared-admin-")
-    [2 0 user-id]
-
-    (str/starts-with? user-id "leader-")
-    [3 0 user-id]
-
-    :else
-    [4 0 user-id]))
 
 (defn- permission-sort-key
   [permission]
@@ -530,40 +510,16 @@
        sort-resources))
 
 (defn- known-user-id-stream
-  [db acl]
-  (->> (concat
-        (when acl
-          (loop [cursor-token nil
-                 seen-cursors #{}
-                 relationships []]
-            (let [{:keys [data] :as page}
-                  (eacl/read-relationships
-                   acl
-                   (merge {:subject/type :user}
-                          (forward-page-options user-page-size cursor-token)))
-                  cursor         (next-page-cursor page)
-                  relationships' (into relationships data)
-                  repeated?      (or (nil? cursor)
-                                     (contains? seen-cursors cursor))]
-              (if-not repeated?
-                (recur cursor
-                       (conj seen-cursors cursor)
-                       relationships')
-                (map (comp :id :subject) relationships')))))
-        (keep (fn [{:keys [id]}]
-                (when (d/entid db [:eacl/id id])
-                  id))
-              quick-subjects))
-       distinct
-       (sort-by user-sort-key)))
+  [db]
+  (seed/known-user-ids db))
 
 (defn paged-known-users
-  [db _client acl state]
+  [db _client _acl state]
   (let [requested-page (max 0 (long (or (get-in state [:ui :user-page])
                                         (:user-page state)
                                         0)))
         started-at     (now-nanos)
-        all-users      (vec (known-user-id-stream db acl))
+        all-users      (known-user-id-stream db)
         total          (count all-users)
         max-page       (max 0 (long (quot (max 0 (dec total)) user-page-size)))
         effective-page (min requested-page max-page)
