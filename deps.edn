@@ -5,10 +5,10 @@
 
   ;; Authorization
   eacl/eacl                 {:git/url "https://github.com/theronic/eacl.git"
-                             :git/sha "5f54839b11e3a43e14d5f8e6094613d1b071ab8e"
+                             :git/sha "b4c0dd97ed4faed1851daede8e477833f743a4c7"
                              :deps/root "modules/eacl"}
   eacl/eacl-datascript      {:git/url "https://github.com/theronic/eacl.git"
-                             :git/sha "5f54839b11e3a43e14d5f8e6094613d1b071ab8e"
+                             :git/sha "b4c0dd97ed4faed1851daede8e477833f743a4c7"
                              :deps/root "modules/eacl-datascript"}}
 
  :paths ["src" "resources"]
