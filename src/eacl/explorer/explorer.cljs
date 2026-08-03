@@ -17,6 +17,7 @@
 (def resource-page-size 20)
 (def user-page-size 20)
 (def max-expansion-depth 4)
+(def ^:private ui-hidden-resource-types #{:platform})
 
 (defn normalize-identifier
   [value]
@@ -68,6 +69,7 @@
   [resource-types]
   (->> resource-types
        (keep normalize-resource-type)
+       (remove ui-hidden-resource-types)
        distinct
        (sort-by resource-type-sort-key)
        vec))
@@ -97,7 +99,7 @@
   {:subject-id             "user-1"
    :permission             :view
    :selected-resource      nil
-   :user-page              0
+   :user-page              nil
    :group-expanded         #{}
    :group-pages            {}
    :expanded-resource-keys #{}
@@ -181,6 +183,13 @@
 (defn group-page-options
   [state resource-type]
   (:page-options (group-page state resource-type)))
+
+(defn user-page
+  [state]
+  (or (get-in state [:ui :user-page])
+      (:user-page state)
+      {:page-number 1
+       :page-options {:first user-page-size}}))
 
 (defn forward-page-options
   [page-size cursor-token]
@@ -515,30 +524,37 @@
        (hydrate-objects db)
        sort-resources))
 
-(defn- known-user-id-stream
-  [db]
-  (seed/known-user-ids db))
-
 (defn paged-known-users
-  [db _client _acl state]
-  (let [requested-page (max 0 (long (or (get-in state [:ui :user-page])
-                                        (:user-page state)
-                                        0)))
-        started-at     (now-nanos)
-        all-users      (known-user-id-stream db)
-        total          (count all-users)
-        max-page       (max 0 (long (quot (max 0 (dec total)) user-page-size)))
-        effective-page (min requested-page max-page)
-        offset         (* effective-page user-page-size)
-        end            (min total (+ offset user-page-size))
-        page-users     (subvec all-users offset end)
-        elapsed        (- (now-nanos) started-at)]
+  [db _client acl state]
+  (let [{:keys [page-number page-options]} (user-page state)
+        base-query      {:resource     (seed/->platform "platform")
+                         :permission   :view
+                         :subject/type :user
+                         :cache?       (cache-enabled? state)
+                         :consistency  consistency/fully-consistent}
+        query           (merge base-query page-options)
+        started-at      (now-nanos)
+        {subjects :data page-info :page-info page-cached? :cached?}
+        (eacl/lookup-subjects acl query)
+        {total :count count-cached? :cached?}
+        (eacl/count-subjects acl base-query)
+        elapsed         (- (now-nanos) started-at)
+        page-users      (mapv :id subjects)
+        offset          (* (dec page-number) user-page-size)
+        end             (+ offset (count page-users))]
     {:items      page-users
-     :page       effective-page
+     :page       page-number
      :total      total
      :time       elapsed
-     :has-prev?  (pos? effective-page)
-     :has-next?  (< end total)
+     :cached?    (and page-cached? count-cached?)
+     :page-cached? page-cached?
+     :count-cached? count-cached?
+     :previous-cursor (when (:has-previous-page? page-info)
+                        (:start-cursor page-info))
+     :next-cursor (when (:has-next-page? page-info)
+                    (:end-cursor page-info))
+     :has-prev?  (boolean (:has-previous-page? page-info))
+     :has-next?  (boolean (:has-next-page? page-info))
      :page-start (if (seq page-users) (inc offset) 0)
      :page-end   end}))
 

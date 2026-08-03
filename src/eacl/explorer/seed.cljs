@@ -6,11 +6,10 @@
             [goog.string :as gstring]
             [goog.string.format]))
 
-(def seed-version 4)
+(def seed-version 5)
 (def seed-marker-id "eacl-explorer/seed-state")
 (def root-user-count 3)
 (def default-seed-size 10000)
-(def user-directory-attr :eacl.explorer/user-order+id)
 
 (def benchmark-seed-shape
   {:accounts-per-batch     2
@@ -51,7 +50,6 @@
    :team/name         {:db/index true}
    :vpc/name          {:db/index true}
    :server/name       {:db/index true}
-   user-directory-attr {:db/index true}
    :seed/profile      {:db/index true}
    :seed/version      {}
    :seed/total-accounts {}
@@ -63,7 +61,7 @@
    :seed/seed-runs      {}})
 
 (def multipath-schema-dsl
-  (inline-resource "eacl/explorer/default-schema.zed"))
+  (str (inline-resource "eacl/explorer/default-schema.zed")))
 
 (def ->user (partial spice-object :user))
 (def ->team (partial spice-object :team))
@@ -72,20 +70,9 @@
 (def ->account (partial spice-object :account))
 (def ->vpc (partial spice-object :vpc))
 
-(defn- user-directory-entity
-  [user-id order]
-  {:eacl/id user-id
-   user-directory-attr [order user-id]})
-
-(defn known-user-ids
-  "Returns the Explorer's explicitly registered users in display order.
-
-  The directory is an Explorer concern, not an authorization query. Keeping a
-  compact ordered value in AVET makes its cost depend only on the user count,
-  without traversing or cursor-windowing the relationship graph."
-  [db]
-  (->> (d/datoms db :avet user-directory-attr)
-       (mapv (comp second :v))))
+(defn- user-entity
+  [user-id]
+  {:eacl/id user-id})
 
 (defn create-conn
   []
@@ -246,15 +233,18 @@
    :entity-count 4
    :tx-data      [{:db/id   -1
                    :eacl/id "platform"}
-                  (assoc (user-directory-entity "super-user" 0) :db/id -2)
-                  (assoc (user-directory-entity "user-1" 0) :db/id -3)
-                  (assoc (user-directory-entity "user-2" 0) :db/id -4)]})
+                  (assoc (user-entity "super-user") :db/id -2)
+                  (assoc (user-entity "user-1") :db/id -3)
+                  (assoc (user-entity "user-2") :db/id -4)]})
 
 (defn- root-relationships-batch
   []
   {:phase          :foundation
    :label          "Installing root relationships"
-   :relationships  [(relationship (->user "super-user") :super_admin (->platform "platform"))]})
+   :relationships  [(relationship (->user "super-user") :super_admin (->platform "platform"))
+                    (relationship (->user "super-user") :user (->platform "platform"))
+                    (relationship (->user "user-1") :user (->platform "platform"))
+                    (relationship (->user "user-2") :user (->platform "platform"))]})
 
 (defn- structure-batch
   [layouts]
@@ -272,16 +262,16 @@
                        (concat
                         [{:eacl/id      (:id account)
                           :account/name (:name account)}
-                         (user-directory-entity owner-id 1)]
+                         (user-entity owner-id)]
                         (mapcat (fn [{:keys [id leader-id name]}]
                                   [{:eacl/id id
                                     :team/name name}
-                                   (user-directory-entity leader-id 3)])
+                                   (user-entity leader-id)])
                           teams)
                         (mapcat (fn [{:keys [id shared-admin-id name]}]
                                   [{:eacl/id id
                                     :vpc/name name}
-                                   (user-directory-entity shared-admin-id 2)])
+                                   (user-entity shared-admin-id)])
                           vpcs)))
                      layouts))
    :relationships (vec
@@ -289,14 +279,24 @@
                      (fn [{:keys [account owner-id teams vpcs]}]
                        (concat
                         [(relationship (->platform "platform") :platform (->account (:id account)))
-                         (relationship (->user owner-id) :owner (->account (:id account)))]
-                        (mapcat (fn [{:keys [id leader-id]}]
-                                  [(relationship (->account (:id account)) :account (->team id))
-                                   (relationship (->user leader-id) :leader (->team id))])
+                         (relationship (->user owner-id) :owner (->account (:id account)))
+                         (relationship (->user owner-id) :user (->platform "platform"))]
+                        (mapcat (fn [team-index {:keys [id leader-id]}]
+                                  (cond-> [(relationship (->account (:id account)) :account (->team id))
+                                           (relationship (->user leader-id) :leader (->team id))
+                                           (relationship (->user leader-id) :user (->platform "platform"))]
+                                    (pos? team-index)
+                                    (conj
+                                     (relationship
+                                      (->team (:id (nth teams (dec team-index))))
+                                      :parent
+                                      (->team id)))))
+                          (range)
                           teams)
                         (mapcat (fn [{:keys [id shared-admin-id]}]
                                   [(relationship (->account (:id account)) :account (->vpc id))
-                                   (relationship (->user shared-admin-id) :shared_admin (->vpc id))])
+                                   (relationship (->user shared-admin-id) :shared_admin (->vpc id))
+                                   (relationship (->user shared-admin-id) :user (->platform "platform"))])
                           vpcs)))
                      layouts))})
 
@@ -466,16 +466,16 @@
    (d/transact! conn
      [{:db/id   -1
        :eacl/id "platform"}
-      (assoc (user-directory-entity "super-user" 0) :db/id -2)
-      (assoc (user-directory-entity "user-1" 0) :db/id -3)
-      (assoc (user-directory-entity "user-2" 0) :db/id -4)
+      (assoc (user-entity "super-user") :db/id -2)
+      (assoc (user-entity "user-1") :db/id -3)
+      (assoc (user-entity "user-2") :db/id -4)
       (merge {:db/id -5
               :eacl/id seed-marker-id
               :seed/next-account-n 1
               :seed/seed-runs 0}
         (totals->metadata empty-totals))])
-   (eacl/write-relationship! client :touch
-     (->user "super-user") :super_admin (->platform "platform"))
+   (eacl/create-relationships! client
+     (:relationships (root-relationships-batch)))
    {:status :ready
     :totals (current-totals (d/db conn))}))
 
