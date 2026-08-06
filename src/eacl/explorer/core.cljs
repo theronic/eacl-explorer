@@ -49,6 +49,27 @@
     (str ":" label)
     "No permission"))
 
+(def cache-badge-spec
+  {:hit {:label "HIT"
+         :class "cache-badge--hit"}
+   :miss {:label "MISS"
+          :class "cache-badge--miss"}})
+
+(defn cache-timing
+  [status time]
+  (let [{:keys [label class]}
+        (get cache-badge-spec status (:miss cache-badge-spec))]
+    [:span.cache-timing
+     [:span.cache-timing__paren "("]
+     [:span.cache-badge
+      {:class class
+       :data-cache-status (name (or status :miss))}
+      label]
+     (when time
+       [:span.cache-timing__duration
+        (if (string? time) time (explorer/human-duration time))])
+     [:span.cache-timing__paren ")"]]))
+
 (defn- selected-resource?
   [selected resource]
   (and selected
@@ -154,7 +175,9 @@
        (type-badge resource-type)
        [:span.relationship-group__title (str (identifier-token resource-type) "s")]]
       [:div.group-card__stats
-       [:span.relationship-group__count (section-count-text group)]]]
+       [:span.relationship-group__count
+        (section-count-text group)
+        (cache-timing (:cache-status group) (:time group))]]]
      (when (:expanded? group)
        [:div.group-card__body
         [:div.group-card__meta
@@ -408,6 +431,25 @@
     (renderer "schema-graph-canvas"
       (clj->js (select-keys panel-data [:nodes :links]))))))
 
+(defn schema-preset-tabs
+  [draft-text presets]
+  (into
+   [:div.schema-preset-tabs
+    {:role "tablist"
+     :aria-label "Schema presets"}]
+   (map
+    (fn [{:keys [id label schema]}]
+      [:button.schema-preset-tab
+       {:key (name id)
+        :type "button"
+        :role "tab"
+        :class (when (= draft-text schema)
+                 "schema-preset-tab--active")
+        :aria-selected (= draft-text schema)
+        :on-click #(app-state/set-schema-draft! schema)}
+       label])
+    presets)))
+
 (rum/defcs schema-panel <
   {:did-mount
    (fn [state]
@@ -438,6 +480,9 @@
         [:div
          [:p.panel-label "Spice Schema"]
          [:p.section-meta "Edit the Spice schema and click Write Schema"]]]
+       (schema-preset-tabs
+        (:draft-text panel-data)
+        (:schema-presets panel-data))
        [:textarea.schema-editor
         {:id        "schema-editor"
          :name      "schema-editor"
@@ -576,6 +621,7 @@
          (assoc (explorer/schema-panel-data db acl {:db-rev db-rev})
            :expanded?      schema-expanded?
            :draft-text     schema-draft
+           :schema-presets app-state/schema-presets
            :changed?       (not= schema-draft (explorer/schema-source db))
            :writing?       (= :writing-schema (:status bootstrap))
            :write-disabled? (or (= :writing-schema (:status bootstrap))

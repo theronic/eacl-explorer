@@ -63,6 +63,17 @@
 (def multipath-schema-dsl
   (inline-resource "eacl/explorer/default-schema.zed"))
 
+(def recursive-schema-dsl
+  (inline-resource "eacl/explorer/recursive-schema.zed"))
+
+(def schema-presets
+  [{:id :non-recursive
+    :label "Non-recursive"
+    :schema multipath-schema-dsl}
+   {:id :recursive
+    :label "Recursive"
+    :schema recursive-schema-dsl}])
+
 (def ->user (partial spice-object :user))
 (def ->team (partial spice-object :team))
 (def ->server (partial spice-object :server))

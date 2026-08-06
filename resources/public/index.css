@@ -527,6 +527,43 @@ button {
   background: var(--muted);
 }
 
+.cache-badge {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.cache-badge--hit {
+  color: #18784d;
+  background: rgba(38, 166, 91, 0.12);
+}
+
+.cache-badge--miss {
+  color: #9a5700;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.cache-timing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 5px;
+  white-space: nowrap;
+}
+
+.cache-timing__paren {
+  color: var(--muted);
+}
+
 .type-account {
   background: var(--type-account);
 }
@@ -674,6 +711,33 @@ button {
   line-height: 1.55;
   white-space: pre;
   resize: vertical;
+}
+
+.schema-preset-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+}
+
+.schema-preset-tab {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.65rem;
+}
+
+.schema-preset-tab:hover,
+.schema-preset-tab--active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.schema-preset-tab--active {
+  background: var(--accent-soft);
 }
 
 @media (max-width: 1200px) {

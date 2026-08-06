@@ -40,6 +40,19 @@
   []
   (:client @!runtime))
 
+(def schema-presets seed/schema-presets)
+
+(defn- response-cache-status
+  [response]
+  (if (:cached? response) :hit :miss))
+
+(defn- aggregate-cache-status
+  [statuses]
+  (if (and (seq statuses)
+           (every? #{:hit} statuses))
+    :hit
+    :miss))
+
 (defn ready?
   []
   (not= :booting (get-in @!app [:bootstrap :status])))
@@ -151,6 +164,7 @@
          (fn [app]
            (-> app
                normalize-ui
+               (update :ui reset-navigation)
                (update :db-rev (fnil inc 0)))))
   (when (ready?)
     (invalidate-child-sections!)
@@ -298,7 +312,8 @@
         (ensure-section-key-loaded! section-key)))))
 
 (defn- publish-ready-child-section!
-  [section-key job-id context started-at page-items total total-status next-cursor final?]
+  [section-key job-id context started-at page-items total total-status
+   next-cursor cache-statuses final?]
   (let [page-items' (explorer/hydrate-resources (db) page-items)
         offset      (child-section-page-offset @!app section-key)
         item-count  (count page-items')
@@ -310,15 +325,18 @@
                      :page-end    (if (pos? item-count) (+ offset item-count) 0)
                      :next-cursor next-cursor
                      :time        (- (explorer/now-nanos) started-at)
+                     :cache-status (aggregate-cache-status cache-statuses)
                      :error       nil}]
     (when (publish-child-section! section-key job-id context snapshot final?)
       (start-expanded-child-sections-for-resources! page-items'))))
 
 (defn- finalize-child-section-total!
-  [section-key job-id context total total-status]
+  [section-key job-id context total total-status cache-statuses]
   (publish-child-section! section-key job-id context
                           {:total        total
-                           :total-status total-status}
+                           :total-status total-status
+                           :total-cache-status
+                           (aggregate-cache-status cache-statuses)}
                           true))
 
 (defn- read-child-relationships
@@ -332,7 +350,9 @@
                   :resource/relation relation-name
                   :first             limit}
            cursor-token (assoc :after cursor-token)))]
-    (assoc result :cursor (explorer/next-page-cursor result))))
+    (assoc result
+           :cursor (explorer/next-page-cursor result)
+           :cache-status (response-cache-status result))))
 
 (defn- resource-authorized?
   [acl subject permission permission-implied? resource]
@@ -377,11 +397,12 @@
   (let [acl        (client)
         subject    (seed/->user (:subject-id context))
         permission (:permission context)]
-    (letfn [(step [cursor-token total]
+    (letfn [(step [cursor-token total cache-statuses]
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
                   (let [{relationships :data
-                         next-cursor   :cursor}
+                         next-cursor   :cursor
+                         cache-status  :cache-status}
                         (read-child-relationships acl
                                                   parent
                                                   resource-type
@@ -391,6 +412,7 @@
                         more-batches? (and (= child-section-count-batch-size (count relationships))
                                            (some? next-cursor)
                                            (not= next-cursor cursor-token))
+                        cache-statuses' (conj cache-statuses cache-status)
                         total'        (+ total
                                          (if permission-implied?
                                            (count relationships)
@@ -401,11 +423,16 @@
                                                    0
                                                    relationships)))]
                     (if (and more-batches? next-cursor)
-                      (js/setTimeout #(step next-cursor total') 0)
-                      (finalize-child-section-total! section-key job-id context total' "ready")))
+                      (js/setTimeout
+                       #(step next-cursor total' cache-statuses')
+                       0)
+                      (finalize-child-section-total!
+                       section-key job-id context total' "ready"
+                       cache-statuses')))
                   (catch :default _
-                    (finalize-child-section-total! section-key job-id context nil "error")))))]
-      (js/setTimeout #(step nil 0) 0))))
+                    (finalize-child-section-total!
+                     section-key job-id context nil "error" [:miss])))))]
+      (js/setTimeout #(step nil 0 []) 0))))
 
 (defn- launch-single-relation-child-section-job!
   [section-key context parent resource-type relation-def job-id]
@@ -421,7 +448,7 @@
                              resource-type
                              relation-name
                              permission)]
-    (letfn [(finish-page! [page-items next-cursor]
+    (letfn [(finish-page! [page-items next-cursor cache-statuses]
               (if next-cursor
                 (do
                   (publish-ready-child-section! section-key
@@ -432,6 +459,7 @@
                                                 nil
                                                 "loading"
                                                 next-cursor
+                                                cache-statuses
                                                 false)
                   (launch-single-relation-total-job! section-key
                                                      context
@@ -448,26 +476,30 @@
                                               (+ offset (count page-items))
                                               "ready"
                                               nil
+                                              cache-statuses
                                               true)))
-            (step [cursor-token page-items]
+            (step [cursor-token page-items cache-statuses]
               (when (same-child-job-context? @!app section-key job-id context)
                 (try
                   (let [batch-limit      (child-page-batch-limit permission-implied?)
                         {relationships    :data
-                         next-batch-cursor :cursor}
+                         next-batch-cursor :cursor
+                         cache-status     :cache-status}
                         (read-child-relationships acl
                                                   parent
                                                   resource-type
                                                   relation-name
                                                   cursor-token
                                                   batch-limit)
+                        cache-statuses'  (conj cache-statuses cache-status)
                         more-batches?    (and (= batch-limit (count relationships))
                                               (some? next-batch-cursor)
                                               (not= next-batch-cursor cursor-token))]
                     (if permission-implied?
                       (finish-page! (mapv :resource relationships)
                                     (when more-batches?
-                                      next-batch-cursor))
+                                      next-batch-cursor)
+                                    cache-statuses')
                       (let [{:keys [page-items page-full? consumed-count]}
                             (collect-page-items acl
                                                 subject
@@ -491,13 +523,17 @@
                                                nil)]
                         (cond
                           next-page-cursor
-                          (finish-page! page-items next-page-cursor)
+                          (finish-page! page-items next-page-cursor
+                                        cache-statuses')
 
                           (and more-batches? next-batch-cursor)
-                          (js/setTimeout #(step next-batch-cursor page-items) 0)
+                          (js/setTimeout
+                           #(step next-batch-cursor page-items
+                                  cache-statuses')
+                           0)
 
                           :else
-                          (finish-page! page-items nil)))))
+                          (finish-page! page-items nil cache-statuses')))))
                   (catch :default ex
                     (publish-child-section! section-key job-id context
                                             {:status "error"
@@ -508,9 +544,10 @@
                                              :page-end 0
                                              :next-cursor nil
                                              :time (- (explorer/now-nanos) started-at)
+                                             :cache-status :miss
                                              :error (ex-message ex)}
                                             true)))))]
-      (js/setTimeout #(step (:cursor-token context) []) 0))))
+      (js/setTimeout #(step (:cursor-token context) [] []) 0))))
 
 (defn- launch-fallback-child-section-job!
   [section-key context parent resource-type relation-defs job-id]
@@ -518,12 +555,13 @@
         subject    (seed/->user (:subject-id context))
         permission (:permission context)
         started-at (explorer/now-nanos)]
-    (letfn [(step [remaining-defs cursor-token seen authorized]
+    (letfn [(step [remaining-defs cursor-token seen authorized cache-statuses]
               (when (same-child-job-context? @!app section-key job-id context)
                 (if-let [relation-def (first remaining-defs)]
                   (try
                     (let [{relationships   :data
-                           next-cursor-token :cursor}
+                           next-cursor-token :cursor
+                           cache-status      :cache-status}
                           (read-child-relationships
                            acl
                            parent
@@ -551,7 +589,8 @@
                        #(step (if more? remaining-defs (next remaining-defs))
                               (when more? next-cursor-token)
                               seen'
-                              authorized')
+                              authorized'
+                              (conj cache-statuses cache-status))
                        0))
                     (catch :default ex
                       (publish-child-section! section-key job-id context
@@ -563,6 +602,7 @@
                                                :page-end 0
                                                :next-cursor nil
                                                :time (- (explorer/now-nanos) started-at)
+                                               :cache-status :miss
                                                :error (ex-message ex)}
                                               true)))
                   (let [resources (explorer/hydrate-and-sort-resources (db) authorized)
@@ -577,11 +617,14 @@
                                                      :page-end   page-end
                                                      :next-cursor next-cursor
                                                      :time       (- (explorer/now-nanos) started-at)
+                                                     :cache-status
+                                                     (aggregate-cache-status
+                                                      cache-statuses)
                                                      :error      nil}
                                                     true)]
                     (when ok?
                       (start-expanded-child-sections-for-resources! items))))))]
-      (js/setTimeout #(step relation-defs nil #{} []) 0))))
+      (js/setTimeout #(step relation-defs nil #{} [] []) 0))))
 
 (defn- launch-child-section-job!
   [parent resource-type]
@@ -830,7 +873,9 @@
         (letfn [(finish! [status extra]
                   (when (and (= status :ready)
                              (nil? (:seed-error extra)))
-                    (update-ui! #(assoc % :user-page 0)))
+                    (update-ui! #(-> %
+                                     reset-navigation
+                                     (assoc :user-page 0))))
                   (set-bootstrap-state!
                    (merge {:status            status
                            :totals            (seed/current-totals (d/db conn))

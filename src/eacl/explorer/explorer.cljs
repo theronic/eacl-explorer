@@ -730,6 +730,7 @@
              :notice        (when-not supported?
                               (permission-notice permission resource-type))
              :total         (when ready? total)
+             :cache-status  (or (:cache-status entry) :miss)
              :time          (:time entry)}
       (= "error" status)
       (assoc :error (:error entry))
