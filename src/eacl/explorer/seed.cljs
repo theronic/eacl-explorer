@@ -76,9 +76,7 @@
 
 (defn make-client
   [conn]
-  (datascript/make-client conn
-    {:entity->object-id     (fn [entity] (:eacl/id entity))
-     :object-id->lookup-ref (fn [object-id] [:eacl/id object-id])}))
+  (datascript/make-client conn {}))
 
 (defonce conn (create-conn))
 (defonce client (make-client conn))

@@ -513,6 +513,11 @@
        (hydrate-objects db)
        sort-resources))
 
+(defn next-page-cursor
+  [{:keys [page-info]}]
+  (when (:has-next-page? page-info)
+    (:end-cursor page-info)))
+
 (defn- known-user-id-stream
   [db acl]
   (->> (concat
@@ -520,16 +525,17 @@
           (loop [cursor-token nil
                  seen-cursors #{}
                  relationships []]
-            (let [{:keys [data cursor]}
-                  (eacl/read-relationships acl
-                                           (cond-> {:subject/type :user
-                                                    :limit        1000}
-                                             cursor-token (assoc :cursor cursor-token)))
+            (let [{:keys [data] :as result}
+                  (eacl/read-relationships
+                   acl
+                   (cond-> {:subject/type :user
+                            :first        1000}
+                     cursor-token (assoc :after cursor-token)))
+                  cursor          (next-page-cursor result)
                   relationships' (into relationships data)
                   repeated?      (or (nil? cursor)
                                      (contains? seen-cursors cursor))]
-              (if (and (= 1000 (count data))
-                       (not repeated?))
+              (if (not repeated?)
                 (recur cursor
                        (conj seen-cursors cursor)
                        relationships')
@@ -568,11 +574,13 @@
   [db acl query]
   (let [started-at (now-nanos)]
     (try
-      (let [{:keys [data cursor] :as result}
+      (let [{:keys [data] :as result}
             (eacl/lookup-resources acl
-              (assoc query :consistency consistency/fully-consistent))]
+              (assoc query :consistency consistency/fully-consistent))
+            cursor (next-page-cursor result)]
         (assoc result
           :items (hydrate-objects db data)
+          :cursor cursor
           :time  (- (now-nanos) started-at)))
       (catch :default ex
         {:items  []
@@ -620,12 +628,15 @@
       expanded?
       (merge
        (if supported?
-         (let [result     (try-lookup-resources db acl
-                            {:subject       (seed/->user (current-subject-id state))
-                             :permission    permission
-                             :resource/type resource-type
-                             :cursor        (current-group-cursor state resource-type)
-                             :limit         resource-page-size})
+         (let [cursor-token (current-group-cursor state resource-type)
+               result     (try-lookup-resources
+                           db
+                           acl
+                           (cond-> {:subject       (seed/->user (current-subject-id state))
+                                    :permission    permission
+                                    :resource/type resource-type
+                                    :first         resource-page-size}
+                             cursor-token (assoc :after cursor-token)))
                item-count (count (:items result))
                start      (if (pos? item-count)
                             (inc (* resource-page-size (dec (group-page-number state resource-type))))
