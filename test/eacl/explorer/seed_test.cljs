@@ -2,8 +2,16 @@
   (:require [cljs.test :refer-macros [deftest is]]
             [datascript.core :as d]
             [eacl.core :as eacl]
+            [eacl.datascript.core :as datascript]
             [eacl.explorer.seed :as seed]
             [eacl.explorer.support :as support]))
+
+(deftest explorer-client-inherits-managed-datascript-coherence
+  (let [client (seed/make-client (seed/create-conn))]
+    (is (= :managed
+           (get-in client [:opts :coherence-authority])))
+    (is (= :mutation
+           (get-in client [:opts :proof-mode])))))
 
 (deftest install-schema-and-fixtures-uses-smoke-profile
   (support/with-test-runtime* :smoke
@@ -55,10 +63,12 @@
 
 (deftest benchmark-profile-targets-one-hundred-thousand-servers
   (let [{:keys [servers]} (seed/profile-totals :benchmark)
-        {:keys [num-accounts servers-per-acct]} (seed/profile-config :benchmark)]
+        {:keys [num-accounts servers-per-acct primary-owned-accounts]}
+        (seed/profile-config :benchmark)]
     (is (= 100000 servers))
     (is (= 50 num-accounts))
-    (is (= 2000 servers-per-acct))))
+    (is (= 2000 servers-per-acct))
+    (is (= 4 primary-owned-accounts))))
 
 (deftest schema-presets-expose-matched-non-recursive-and-recursive-fixtures
   (is (= [:non-recursive :recursive]
@@ -81,11 +91,11 @@
       (is (= 1 (:seed/next-account-n seed-state)))
       (is (= 0 (:seed/seed-runs seed-state)))
       (is (= 1 (count (:data (eacl/read-relationships client
-                                                      {:subject/type      :user
-                                                       :subject/id        "super-user"
-                                                       :resource/type     :platform
-                                                       :resource/id       "platform"
-                                                       :resource/relation :super_admin})))))
+                               {:subject/type      :user
+                                :subject/id        "super-user"
+                                :resource/type     :platform
+                                :resource/id       "platform"
+                                :resource/relation :super_admin})))))
       (is (zero? (or (d/q '[:find (count ?server) .
                             :where
                             [?server :server/name _]]
@@ -102,33 +112,35 @@
     (is (not (identical? (:conn fresh-1) (:conn fresh-2))))
     (is (not (identical? (:client fresh-1) (:client fresh-2))))))
 
+(deftest runtime-cache-controls-target-the-clients-native-cache
+  (let [{:keys [conn client]} (seed/create-runtime)
+        request {:subject (seed/->user "super-user")
+                 :permission :view
+                 :resource/type :account
+                 :first 20}]
+    (seed/install-schema+fixtures! conn client {:seed/profile :smoke})
+    (is (false? (:cached? (eacl/lookup-resources client request))))
+    (is (pos? (+ (:exact-entries (datascript/cache-stats client))
+                 (:managed-entries (datascript/cache-stats client)))))
+    (is (true? (:cached? (eacl/lookup-resources client request))))
+    (datascript/expire-cache! client)
+    (is (zero? (+ (:exact-entries (datascript/cache-stats client))
+                  (:managed-entries (datascript/cache-stats client)))))
+    (is (false? (:cached? (eacl/lookup-resources client request))))))
+
 (deftest read-relationships-honors-relay-pagination-for-anchored-queries
   (support/with-test-runtime* :smoke
     (fn [{:keys [client]}]
-      (let [{page-1 :data page-info :page-info}
-            (eacl/read-relationships client
-                                     {:subject/type      :account
-                                      :subject/id        "account-0001"
-                                      :resource/type     :team
-                                      :resource/relation :account
-                                      :first             2})
+      (let [query {:subject/type      :account
+                   :subject/id        "account-0001"
+                   :resource/type     :team
+                   :resource/relation :account
+                   :first             2}
+            first-response (eacl/read-relationships client query)
+            repeated-response (eacl/read-relationships client query)
+            {page-1 :data page-info :page-info} first-response
             cursor (:end-cursor page-info)
             {page-2 :data}
-            (eacl/read-relationships client
-                                     {:subject/type      :account
-                                      :subject/id        "account-0001"
-                                      :resource/type     :team
-                                      :resource/relation :account
-                                      :after             cursor
-                                      :first             2})
-            repeated-page-1
-            (eacl/read-relationships client
-                                     {:subject/type      :account
-                                      :subject/id        "account-0001"
-                                      :resource/type     :team
-                                      :resource/relation :account
-                                      :first             2})
-            repeated-page-2
             (eacl/read-relationships client
                                      {:subject/type      :account
                                       :subject/id        "account-0001"
@@ -143,9 +155,9 @@
         (is (= ["team-0001-01" "team-0001-02"] page-1-ids))
         (is (= ["team-0001-03"] page-2-ids))
         (is (true? (:has-next-page? page-info)))
-        (is (string? cursor))
-        (is (true? (:cached? repeated-page-1)))
-        (is (true? (:cached? repeated-page-2)))))))
+        (is (false? (:cached? first-response)))
+        (is (true? (:cached? repeated-response)))
+        (is (string? cursor))))))
 
 (deftest seed-more-plan-appends-servers-and-advances-account-counters
   (let [{:keys [conn client]} (seed/create-runtime)]

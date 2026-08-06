@@ -1,7 +1,9 @@
 (ns eacl.explorer.state
-  (:require [clojure.string :as str]
+  (:require [cljs.pprint :as pprint]
+            [clojure.string :as str]
             [datascript.core :as d]
             [eacl.core :as eacl]
+            [eacl.datascript.core :as datascript]
             [eacl.explorer.explorer :as explorer]
             [eacl.explorer.seed :as seed]))
 
@@ -22,10 +24,16 @@
    :ui        explorer/default-ui-state
    :counts    explorer/default-count-state
    :child-sections {}
+   :cache-metrics {:status "idle"
+                   :data nil
+                   :edn "{}"
+                   :error nil}
+   :selection-rev 0
    :db-rev    0})
 
 (defonce !runtime (atom nil))
 (defonce !app (atom (initial-app-state)))
+(defonce !metrics-refresh-scheduled? (atom false))
 (defonce listener-key (keyword (str "eacl-explorer-" (random-uuid))))
 
 (defn runtime
@@ -40,18 +48,46 @@
   []
   (:client @!runtime))
 
-(def schema-presets seed/schema-presets)
+(def ui-query-pull
+  [:explorer.ui/subject-id
+   :explorer.ui/permission
+   :explorer.ui/selected-resource-type
+   :explorer.ui/selected-resource-id
+   :explorer.ui/cache-enabled?
+   :explorer.ui/query-generation])
 
-(defn- response-cache-status
-  [response]
-  (if (:cached? response) :hit :miss))
+(defn query-state
+  ([]
+   (query-state (db)))
+  ([db-value]
+   (let [entity
+         (when db-value
+           (d/pull db-value ui-query-pull
+                   [:eacl/id seed/ui-state-marker-id]))
+         resource-type
+         (:explorer.ui/selected-resource-type entity)
+         resource-id
+         (:explorer.ui/selected-resource-id entity)]
+     {:subject-id
+      (or (:explorer.ui/subject-id entity)
+          (:subject-id explorer/default-ui-state))
+      :permission
+      (or (:explorer.ui/permission entity)
+          (:permission explorer/default-ui-state))
+      :selected-resource
+      (when (and resource-type resource-id)
+        {:type resource-type
+         :id resource-id})
+      :cache-enabled?
+      (not (false? (:explorer.ui/cache-enabled? entity)))
+      :query-generation
+      (long (or (:explorer.ui/query-generation entity) 0))})))
 
-(defn- aggregate-cache-status
-  [statuses]
-  (if (and (seq statuses)
-           (every? #{:hit} statuses))
-    :hit
-    :miss))
+(defn view-state
+  ([]
+   (view-state @!app))
+  ([app]
+   (update app :ui merge (query-state))))
 
 (defn ready?
   []
@@ -87,20 +123,128 @@
     (catch :default _
       nil)))
 
-(defn- load-ui-state
+(defn- read-session-bool
+  [key fallback]
+  (case (read-session key nil)
+    "true" true
+    "false" false
+    fallback))
+
+(defn- load-query-state
   []
-  (let [stored-permission (read-session "eacl-explorer-permission" nil)]
-    (assoc explorer/default-ui-state
-           :subject-id (read-session "eacl-explorer-subject-id" (:subject-id explorer/default-ui-state))
-           :permission (or (some-> stored-permission explorer/normalize-permission-name)
-                           (:permission explorer/default-ui-state)))))
+  (let [stored-permission
+        (read-session "eacl-explorer-permission" nil)
+        selected-type
+        (some-> (read-session "eacl-explorer-selected-resource-type" nil)
+                explorer/normalize-resource-type)
+        selected-id
+        (read-session "eacl-explorer-selected-resource-id" nil)]
+    {:subject-id
+     (read-session "eacl-explorer-subject-id"
+                   (:subject-id explorer/default-ui-state))
+     :permission
+     (or (some-> stored-permission explorer/normalize-permission-name)
+         (:permission explorer/default-ui-state))
+     :selected-resource
+     (when (and selected-type selected-id)
+       {:type selected-type :id selected-id})
+     :cache-enabled?
+     (read-session-bool "eacl-explorer-cache-enabled" true)}))
 
 (defn- persist-ui!
-  [app]
-  (write-session! "eacl-explorer-subject-id" (explorer/current-subject-id app))
-  (if-let [permission (explorer/current-permission app)]
-    (write-session! "eacl-explorer-permission" (name permission))
-    (remove-session! "eacl-explorer-permission")))
+  [_app]
+  (let [{:keys [subject-id permission selected-resource cache-enabled?]}
+        (query-state)]
+    (write-session! "eacl-explorer-subject-id" subject-id)
+    (write-session! "eacl-explorer-cache-enabled" (str cache-enabled?))
+    (if-let [resource-type (:type selected-resource)]
+      (write-session! "eacl-explorer-selected-resource-type"
+                      (name resource-type))
+      (remove-session! "eacl-explorer-selected-resource-type"))
+    (if-let [resource-id (:id selected-resource)]
+      (write-session! "eacl-explorer-selected-resource-id" resource-id)
+      (remove-session! "eacl-explorer-selected-resource-id"))
+    (if permission
+      (write-session! "eacl-explorer-permission" (name permission))
+      (remove-session! "eacl-explorer-permission"))))
+
+(def query-key->attr
+  {:subject-id :explorer.ui/subject-id
+   :permission :explorer.ui/permission
+   :selected-resource-type :explorer.ui/selected-resource-type
+   :selected-resource-id :explorer.ui/selected-resource-id
+   :cache-enabled? :explorer.ui/cache-enabled?})
+
+(defn- transact-query-state!
+  ([changes]
+   (transact-query-state! changes true))
+  ([changes advance-generation?]
+   (when-let [conn (:conn @!runtime)]
+     (let [db-before (d/db conn)
+           entity-id [:eacl/id seed/ui-state-marker-id]
+           current-generation
+           (:query-generation (query-state db-before))
+           tx-data
+           (into
+            (cond-> []
+              advance-generation?
+              (conj [:db/add entity-id
+                     :explorer.ui/query-generation
+                     (inc current-generation)]))
+            (mapcat
+             (fn [[query-key value]]
+               (let [attr (get query-key->attr query-key)
+                     previous (get (d/pull db-before [attr] entity-id)
+                                   attr)]
+                 (cond
+                   (nil? attr)
+                   []
+
+                   (nil? value)
+                   (when (some? previous)
+                     [[:db/retract entity-id attr previous]])
+
+                   :else
+                   [[:db/add entity-id attr value]]))))
+            changes)]
+       (when (seq tx-data)
+         (d/transact! conn tx-data))
+       (persist-ui! @!app)))))
+
+(defn cache-request
+  [context request]
+  (explorer/cache-request context request))
+
+(defn refresh-cache-metrics-now!
+  []
+  (let [snapshot
+        (try
+          {:status "ready"
+           :data (when-let [acl (client)]
+                   {:enabled? (:cache-enabled? (query-state))
+                    :backend (datascript/cache-stats acl)})
+           :error nil}
+          (catch :default ex
+            {:status "error"
+             :data nil
+             :error (ex-message ex)}))
+        snapshot'
+        (assoc snapshot
+               :edn
+               (if-let [data (:data snapshot)]
+                 (with-out-str (pprint/pprint data))
+                 "{}"))]
+    (swap! !app assoc :cache-metrics snapshot')
+    snapshot'))
+
+(defn refresh-cache-metrics!
+  []
+  (when (compare-and-set! !metrics-refresh-scheduled? false true)
+    (js/setTimeout
+     (fn []
+       (reset! !metrics-refresh-scheduled? false)
+       (refresh-cache-metrics-now!))
+     0)))
 
 (defn- reset-navigation
   [ui]
@@ -117,29 +261,38 @@
 (defn- available-permissions
   [app]
   (if-let [acl (client)]
-    (explorer/selectable-permissions (db) acl app)
+    (explorer/selectable-permissions (db) acl (view-state app))
     nil))
 
-(defn- normalize-ui
+(defn- normalized-permission
   [app]
   (let [permissions (available-permissions app)
-        current     (explorer/current-permission app)
+        current     (explorer/current-permission (view-state app))
         normalized  (when (some? permissions)
                       (or (when (some #{current} permissions) current)
                           (first permissions)
                           nil))]
-    (if (or (nil? permissions)
-            (= current normalized))
-      app
-      (-> app
-          (update :ui reset-navigation)
-          (assoc-in [:ui :permission] normalized)))))
+    (when (some? permissions)
+      normalized)))
+
+(defn- normalize-query-permission!
+  []
+  (let [current (explorer/current-permission (view-state @!app))
+        normalized (normalized-permission @!app)]
+    (when (and (some? normalized)
+               (not= current normalized))
+      (swap! !app update :ui reset-navigation)
+      (transact-query-state! {:permission normalized}))))
 
 (defn- current-count-context
   [app]
-  {:db-rev     (:db-rev app)
-   :subject-id (explorer/current-subject-id app)
-   :permission (explorer/current-permission app)})
+  (let [{:keys [subject-id permission cache-enabled? query-generation]}
+        (query-state)]
+    {:db-rev (:db-rev app)
+     :subject-id subject-id
+     :permission permission
+     :cache-enabled? cache-enabled?
+     :query-generation query-generation}))
 
 (defn- same-job-context?
   [app resource-type job-id context]
@@ -158,27 +311,47 @@
          ensure-section-key-loaded!
          restart-expanded-child-section-jobs!)
 
+(def selected-resource-ui-attrs
+  #{:explorer.ui/selected-resource-type
+    :explorer.ui/selected-resource-id})
+
+(defn- selection-only-db-change?
+  [tx-report]
+  (let [ui-attrs
+        (->> (:tx-data tx-report)
+             (map :a)
+             (filter #(= "explorer.ui" (namespace %)))
+             set)]
+    (and (seq ui-attrs)
+         (every? selected-resource-ui-attrs ui-attrs))))
+
 (defn on-db-change!
-  []
-  (swap! !app
-         (fn [app]
-           (-> app
-               normalize-ui
-               (update :ui reset-navigation)
-               (update :db-rev (fnil inc 0)))))
-  (when (ready?)
-    (invalidate-child-sections!)
-    (invalidate-counts!)
-    (when-not (seeding?)
-      (start-count-jobs!))
-    (when-not (seeding?)
-      (restart-expanded-child-section-jobs!))))
+  ([]
+   (on-db-change! nil))
+  ([tx-report]
+   (if (selection-only-db-change? tx-report)
+     (swap! !app update :selection-rev (fnil inc 0))
+     (do
+       (swap! !app
+              (fn [app]
+                (-> app
+                    (update :db-rev (fnil inc 0))
+                    (update :ui reset-navigation))))
+       (when (ready?)
+         (invalidate-child-sections!)
+         (invalidate-counts!)
+         (when-not (seeding?)
+           (start-count-jobs!))
+         (when-not (seeding?)
+           (restart-expanded-child-section-jobs!)))))
+   (refresh-cache-metrics!)))
 
 (defn register-db-listener!
   []
   (when-let [conn (:conn @!runtime)]
     (d/listen! conn listener-key
-               (fn [_] (on-db-change!)))))
+               (fn [tx-report]
+                 (on-db-change! tx-report)))))
 
 (defn- publish-count!
   [resource-type job-id context snapshot final?]
@@ -203,30 +376,40 @@
                {:status "unavailable"
                 :count  0
                 :time   nil
+                :cache-status
+                (:cache-status (explorer/direct-result context))
                 :job-id nil})
         (let [job-id  (str (random-uuid))]
           (swap! !app assoc-in [:counts resource-type]
                  {:status "loading"
                   :count  nil
                   :time   nil
+                  :cache-status
+                  (:cache-status (explorer/direct-result context))
                   :job-id job-id})
           (js/setTimeout
            (fn []
              (when (same-job-context? @!app resource-type job-id context)
-               (let [{:keys [count error time]}
+               (let [result
                      (explorer/try-count-resources
                       acl
-                      {:subject       (seed/->user (:subject-id context))
-                       :permission    (:permission context)
-                       :resource/type resource-type})]
+                      (cache-request
+                       context
+                       {:subject       (seed/->user (:subject-id context))
+                        :permission    (:permission context)
+                        :resource/type resource-type}))
+                     {:keys [count error time cache-status]} result]
+                 (refresh-cache-metrics!)
                  (publish-count! resource-type job-id context
                                  (if error
                                    {:status "error"
                                     :count  nil
-                                    :time   (explorer/human-duration time)}
+                                    :time   (explorer/human-duration time)
+                                    :cache-status cache-status}
                                    {:status "done"
                                     :count  count
-                                    :time   (explorer/human-duration time)})
+                                    :time   (explorer/human-duration time)
+                                    :cache-status cache-status})
                                  true))))
            0))))))
 
@@ -244,17 +427,30 @@
 
 (defn- child-section-context
   [app section-key parent resource-type]
-  {:db-rev        (:db-rev app)
-   :subject-id    (explorer/current-subject-id app)
-   :permission    (explorer/current-permission app)
-   :parent-type   (:type parent)
-   :parent-id     (:id parent)
-   :resource-type resource-type
-   :cursor-token  (explorer/current-child-group-cursor app section-key)})
+  (let [{:keys [subject-id permission cache-enabled? query-generation]}
+        (query-state)]
+    {:db-rev        (:db-rev app)
+     :subject-id    subject-id
+     :permission    permission
+     :cache-enabled? cache-enabled?
+     :query-generation query-generation
+     :parent-type   (:type parent)
+     :parent-id     (:id parent)
+     :resource-type resource-type
+     :cursor-token
+     (explorer/current-child-group-cursor app section-key)}))
 
 (defn- child-section-context-keys
   []
-  [:db-rev :subject-id :permission :parent-type :parent-id :resource-type :cursor-token])
+  [:db-rev
+   :subject-id
+   :permission
+   :cache-enabled?
+   :query-generation
+   :parent-type
+   :parent-id
+   :resource-type
+   :cursor-token])
 
 (defn- same-child-job-context?
   [app section-key job-id context]
@@ -314,7 +510,8 @@
 (defn- publish-ready-child-section!
   [section-key job-id context started-at page-items total total-status
    next-cursor cache-statuses final?]
-  (let [page-items' (explorer/hydrate-resources (db) page-items)
+  (let [finished-at (explorer/now-nanos)
+        page-items' (explorer/hydrate-resources (db) page-items)
         offset      (child-section-page-offset @!app section-key)
         item-count  (count page-items')
         snapshot    {:status      "ready"
@@ -324,8 +521,10 @@
                      :page-start  (if (pos? item-count) (inc offset) 0)
                      :page-end    (if (pos? item-count) (+ offset item-count) 0)
                      :next-cursor next-cursor
-                     :time        (- (explorer/now-nanos) started-at)
-                     :cache-status (aggregate-cache-status cache-statuses)
+                     :time        (- finished-at started-at)
+                     :cache-status (explorer/aggregate-cache-status
+                                    context
+                                    cache-statuses)
                      :error       nil}]
     (when (publish-child-section! section-key job-id context snapshot final?)
       (start-expanded-child-sections-for-resources! page-items'))))
@@ -336,45 +535,77 @@
                           {:total        total
                            :total-status total-status
                            :total-cache-status
-                           (aggregate-cache-status cache-statuses)}
+                           (explorer/aggregate-cache-status
+                            context
+                            cache-statuses)}
                           true))
 
 (defn- read-child-relationships
-  [acl parent resource-type relation-name cursor-token limit]
+  [acl context parent resource-type relation-name cursor-token limit]
   (let [result
         (eacl/read-relationships
          acl
-         (cond-> {:subject/type      (:type parent)
-                  :subject/id        (:id parent)
-                  :resource/type     resource-type
-                  :resource/relation relation-name
-                  :first             limit}
-           cursor-token (assoc :after cursor-token)))]
+         (cache-request
+          context
+          (cond-> {:subject/type      (:type parent)
+                   :subject/id        (:id parent)
+                   :resource/type     resource-type
+                   :resource/relation relation-name
+                   :first             limit}
+            cursor-token (assoc :after cursor-token))))]
+    (refresh-cache-metrics!)
     (assoc result
            :cursor (explorer/next-page-cursor result)
-           :cache-status (response-cache-status result))))
+           :cache-status
+           (:cache-status
+            (explorer/response-provenance context result)))))
 
-(defn- resource-authorized?
-  [acl subject permission permission-implied? resource]
-  (or permission-implied?
-      (eacl/can? acl subject permission resource)))
+(defn- resource-authorization-result
+  [acl context subject permission permission-implied? resource]
+  (if permission-implied?
+    {:allowed? true}
+    (let [result
+          (eacl/check-permission
+           acl
+           (cache-request
+            context
+            {:subject subject
+             :permission permission
+             :resource resource}))]
+      (refresh-cache-metrics!)
+      (explorer/response-provenance context result))))
 
 (defn- collect-page-items
-  [acl subject permission permission-implied? existing-items relationships]
+  [acl context subject permission permission-implied?
+   existing-items relationships cache-statuses]
   (loop [remaining relationships
          page-items existing-items
-         consumed-count 0]
+         consumed-count 0
+         statuses cache-statuses]
     (if-let [{:keys [resource]} (first remaining)]
-      (if (resource-authorized? acl subject permission permission-implied? resource)
-        (if (< (count page-items) explorer/resource-page-size)
-          (recur (rest remaining) (conj page-items resource) (inc consumed-count))
-          {:page-items page-items
-           :page-full? true
-           :consumed-count consumed-count})
-        (recur (rest remaining) page-items (inc consumed-count)))
+      (let [{:keys [allowed? cache-status]}
+            (resource-authorization-result
+             acl context subject permission permission-implied? resource)
+            statuses' (cond-> statuses
+                        cache-status (conj cache-status))]
+        (if allowed?
+          (if (< (count page-items) explorer/resource-page-size)
+            (recur (rest remaining)
+                   (conj page-items resource)
+                   (inc consumed-count)
+                   statuses')
+            {:page-items page-items
+             :page-full? true
+             :consumed-count consumed-count
+             :cache-statuses statuses'})
+          (recur (rest remaining)
+                 page-items
+                 (inc consumed-count)
+                 statuses')))
       {:page-items page-items
        :page-full? false
-       :consumed-count consumed-count})))
+       :consumed-count consumed-count
+       :cache-statuses statuses})))
 
 (defn- child-page-batch-limit
   [permission-implied?]
@@ -383,9 +614,10 @@
     child-section-batch-size))
 
 (defn- replay-child-page-cursor
-  [acl parent resource-type relation-name cursor-token consumed-count]
+  [acl context parent resource-type relation-name cursor-token consumed-count]
   (when (pos? consumed-count)
     (:cursor (read-child-relationships acl
+                                       context
                                        parent
                                        resource-type
                                        relation-name
@@ -402,8 +634,9 @@
                 (try
                   (let [{relationships :data
                          next-cursor   :cursor
-                         cache-status  :cache-status}
+                         relationship-cache-status :cache-status}
                         (read-child-relationships acl
+                                                  context
                                                   parent
                                                   resource-type
                                                   relation-name
@@ -412,26 +645,30 @@
                         more-batches? (and (= child-section-count-batch-size (count relationships))
                                            (some? next-cursor)
                                            (not= next-cursor cursor-token))
-                        cache-statuses' (conj cache-statuses cache-status)
-                        total'        (+ total
-                                         (if permission-implied?
-                                           (count relationships)
-                                           (reduce (fn [acc {:keys [resource]}]
-                                                     (if (eacl/can? acl subject permission resource)
-                                                       (inc acc)
-                                                       acc))
-                                                   0
-                                                   relationships)))]
+                        {:keys [total' statuses']}
+                        (if permission-implied?
+                          {:total' (+ total (count relationships))
+                           :statuses' (conj cache-statuses
+                                           relationship-cache-status)}
+                          (reduce
+                           (fn [{:keys [total' statuses']} {:keys [resource]}]
+                             (let [{:keys [allowed? cache-status]}
+                                   (resource-authorization-result
+                                    acl context subject permission false resource)]
+                               {:total' (cond-> total' allowed? inc)
+                                :statuses' (conj statuses' cache-status)}))
+                           {:total' total
+                            :statuses' (conj cache-statuses
+                                            relationship-cache-status)}
+                           relationships))]
                     (if (and more-batches? next-cursor)
-                      (js/setTimeout
-                       #(step next-cursor total' cache-statuses')
-                       0)
+                      (js/setTimeout #(step next-cursor total' statuses') 0)
                       (finalize-child-section-total!
-                       section-key job-id context total' "ready"
-                       cache-statuses')))
+                       section-key job-id context total' "ready" statuses')))
                   (catch :default _
                     (finalize-child-section-total!
-                     section-key job-id context nil "error" [:miss])))))]
+                     section-key job-id context nil "error"
+                     [(:cache-status (explorer/direct-result context))])))))]
       (js/setTimeout #(step nil 0 []) 0))))
 
 (defn- launch-single-relation-child-section-job!
@@ -439,7 +676,10 @@
   (let [acl        (client)
         subject    (seed/->user (:subject-id context))
         permission (:permission context)
-        started-at (explorer/now-nanos)
+        ;; Begin timing in the deferred callback. Starting before setTimeout
+        ;; made cache HIT timings include unrelated Rum rendering and
+        ;; event-loop queue delay, which grows with a populated explorer.
+        started-at (volatile! nil)
         offset     (child-section-page-offset @!app section-key)
         relation-name (:eacl.relation/relation-name relation-def)
         permission-implied? (explorer/child-permission-implied-by-parent?
@@ -454,7 +694,7 @@
                   (publish-ready-child-section! section-key
                                                 job-id
                                                 context
-                                                started-at
+                                                @started-at
                                                 page-items
                                                 nil
                                                 "loading"
@@ -471,7 +711,7 @@
                 (publish-ready-child-section! section-key
                                               job-id
                                               context
-                                              started-at
+                                              @started-at
                                               page-items
                                               (+ offset (count page-items))
                                               "ready"
@@ -484,14 +724,16 @@
                   (let [batch-limit      (child-page-batch-limit permission-implied?)
                         {relationships    :data
                          next-batch-cursor :cursor
-                         cache-status     :cache-status}
+                         relationship-cache-status :cache-status}
                         (read-child-relationships acl
+                                                  context
                                                   parent
                                                   resource-type
                                                   relation-name
                                                   cursor-token
                                                   batch-limit)
-                        cache-statuses'  (conj cache-statuses cache-status)
+                        cache-statuses'  (conj cache-statuses
+                                              relationship-cache-status)
                         more-batches?    (and (= batch-limit (count relationships))
                                               (some? next-batch-cursor)
                                               (not= next-batch-cursor cursor-token))]
@@ -500,16 +742,20 @@
                                     (when more-batches?
                                       next-batch-cursor)
                                     cache-statuses')
-                      (let [{:keys [page-items page-full? consumed-count]}
+                      (let [{:keys [page-items page-full? consumed-count
+                                    cache-statuses]}
                             (collect-page-items acl
+                                                context
                                                 subject
                                                 permission
                                                 permission-implied?
                                                 page-items
-                                                relationships)
+                                                relationships
+                                                cache-statuses')
                             next-page-cursor (cond
                                                (and page-full? (< consumed-count (count relationships)))
                                                (replay-child-page-cursor acl
+                                                                         context
                                                                          parent
                                                                          resource-type
                                                                          relation-name
@@ -524,16 +770,15 @@
                         (cond
                           next-page-cursor
                           (finish-page! page-items next-page-cursor
-                                        cache-statuses')
+                                        cache-statuses)
 
                           (and more-batches? next-batch-cursor)
                           (js/setTimeout
-                           #(step next-batch-cursor page-items
-                                  cache-statuses')
+                           #(step next-batch-cursor page-items cache-statuses)
                            0)
 
                           :else
-                          (finish-page! page-items nil cache-statuses')))))
+                          (finish-page! page-items nil cache-statuses)))))
                   (catch :default ex
                     (publish-child-section! section-key job-id context
                                             {:status "error"
@@ -543,45 +788,61 @@
                                              :page-start 0
                                              :page-end 0
                                              :next-cursor nil
-                                             :time (- (explorer/now-nanos) started-at)
-                                             :cache-status :miss
+                                             :time (- (explorer/now-nanos)
+                                                      @started-at)
+                                             :cache-status
+                                             (:cache-status
+                                              (explorer/direct-result context))
                                              :error (ex-message ex)}
                                             true)))))]
-      (js/setTimeout #(step (:cursor-token context) [] []) 0))))
+      (js/setTimeout
+       #(do
+          (vreset! started-at (explorer/now-nanos))
+          (step (:cursor-token context) [] []))
+       0))))
 
 (defn- launch-fallback-child-section-job!
   [section-key context parent resource-type relation-defs job-id]
   (let [acl        (client)
         subject    (seed/->user (:subject-id context))
         permission (:permission context)
-        started-at (explorer/now-nanos)]
+        started-at (volatile! nil)]
     (letfn [(step [remaining-defs cursor-token seen authorized cache-statuses]
               (when (same-child-job-context? @!app section-key job-id context)
                 (if-let [relation-def (first remaining-defs)]
                   (try
                     (let [{relationships   :data
                            next-cursor-token :cursor
-                           cache-status      :cache-status}
+                           relationship-cache-status :cache-status}
                           (read-child-relationships
                            acl
+                           context
                            parent
                            resource-type
                            (:eacl.relation/relation-name relation-def)
                            cursor-token
                            child-section-batch-size)
                           resources      (map :resource relationships)
-                          [seen' authorized']
-                          (reduce (fn [[seen-resources authorized-resources] resource]
-                                    (let [key' (explorer/resource-key resource)]
-                                      (if (contains? seen-resources key')
-                                        [seen-resources authorized-resources]
-                                        (if (eacl/can? acl subject permission resource)
-                                          [(conj seen-resources key')
-                                           (conj authorized-resources resource)]
-                                          [(conj seen-resources key')
-                                           authorized-resources]))))
-                                  [seen authorized]
-                                  resources)
+                          {:keys [seen' authorized' statuses']}
+                          (reduce
+                           (fn [{:keys [seen' authorized' statuses']} resource]
+                             (let [key' (explorer/resource-key resource)]
+                               (if (contains? seen' key')
+                                 {:seen' seen'
+                                  :authorized' authorized'
+                                  :statuses' statuses'}
+                                 (let [{:keys [allowed? cache-status]}
+                                       (resource-authorization-result
+                                        acl context subject permission false resource)]
+                                   {:seen' (conj seen' key')
+                                    :authorized' (cond-> authorized'
+                                                   allowed? (conj resource))
+                                    :statuses' (conj statuses' cache-status)}))))
+                           {:seen' seen
+                            :authorized' authorized
+                            :statuses' (conj cache-statuses
+                                            relationship-cache-status)}
+                           resources)
                           more?            (and (= child-section-batch-size (count relationships))
                                                 (some? next-cursor-token)
                                                 (not= next-cursor-token cursor-token))]
@@ -590,7 +851,7 @@
                               (when more? next-cursor-token)
                               seen'
                               authorized'
-                              (conj cache-statuses cache-status))
+                              statuses')
                        0))
                     (catch :default ex
                       (publish-child-section! section-key job-id context
@@ -601,8 +862,15 @@
                                                :page-start 0
                                                :page-end 0
                                                :next-cursor nil
-                                               :time (- (explorer/now-nanos) started-at)
-                                               :cache-status :miss
+                                               :time (- (explorer/now-nanos)
+                                                        @started-at)
+                                               :cache-status
+                                               (explorer/aggregate-cache-status
+                                                context
+                                                (conj cache-statuses
+                                                      (:cache-status
+                                                       (explorer/direct-result
+                                                        context))))
                                                :error (ex-message ex)}
                                               true)))
                   (let [resources (explorer/hydrate-and-sort-resources (db) authorized)
@@ -616,15 +884,21 @@
                                                      :page-start page-start
                                                      :page-end   page-end
                                                      :next-cursor next-cursor
-                                                     :time       (- (explorer/now-nanos) started-at)
+                                                     :time       (- (explorer/now-nanos)
+                                                                    @started-at)
                                                      :cache-status
-                                                     (aggregate-cache-status
+                                                     (explorer/aggregate-cache-status
+                                                      context
                                                       cache-statuses)
                                                      :error      nil}
                                                     true)]
                     (when ok?
                       (start-expanded-child-sections-for-resources! items))))))]
-      (js/setTimeout #(step relation-defs nil #{} [] []) 0))))
+      (js/setTimeout
+       #(do
+          (vreset! started-at (explorer/now-nanos))
+          (step relation-defs nil #{} [] []))
+       0))))
 
 (defn- launch-child-section-job!
   [parent resource-type]
@@ -649,6 +923,8 @@
                          :page-end    0
                          :next-cursor nil
                          :time        nil
+                         :cache-status
+                         (:cache-status (explorer/direct-result context))
                          :error       nil}))
           (let [relation-defs (explorer/child-relation-defs acl (:type parent) resource-type)]
             (if-not (seq relation-defs)
@@ -663,6 +939,8 @@
                              :page-end    0
                              :next-cursor nil
                              :time        0
+                             :cache-status
+                             (:cache-status (explorer/direct-result context))
                              :error       nil}))
               (let [job-id (str (random-uuid))]
                 (swap! !app assoc-in [:child-sections section-key]
@@ -676,6 +954,9 @@
                                :page-end    0
                                :next-cursor nil
                                :time        nil
+                               :cache-status
+                               (:cache-status
+                                (explorer/direct-result context))
                                :error       nil}))
                 (if (= 1 (count relation-defs))
                   (launch-single-relation-child-section-job! section-key context parent resource-type (first relation-defs) job-id)
@@ -693,47 +974,45 @@
 
 (defn- update-ui!
   [f]
-  (let [before-permission (explorer/current-permission @!app)]
-    (swap! !app
-           (fn [app]
-             (-> app
-                 (update :ui f)
-                 normalize-ui)))
-    (persist-ui! @!app)
-    {:permission-changed? (not= before-permission
-                                (explorer/current-permission @!app))}))
+  (swap! !app update :ui f)
+  (persist-ui! @!app))
 
 (defn select-subject!
   [subject-id]
-  (update-ui! #(-> %
-                   reset-navigation
-                   (assoc :subject-id subject-id)))
-  (invalidate-child-sections!)
-  (invalidate-counts!)
-  (start-count-jobs!)
-  (restart-expanded-child-section-jobs!))
+  (update-ui! reset-navigation)
+  (transact-query-state! {:subject-id subject-id}))
 
 (defn select-permission!
   [permission]
-  (update-ui! #(-> %
-                   reset-navigation
-                   (assoc :permission (explorer/normalize-permission-name permission))))
-  (invalidate-child-sections!)
-  (invalidate-counts!)
-  (start-count-jobs!)
-  (restart-expanded-child-section-jobs!))
+  (update-ui! reset-navigation)
+  (transact-query-state!
+   {:permission (explorer/normalize-permission-name permission)}))
 
 (defn select-resource!
   [resource]
-  (let [{:keys [permission-changed?]}
-        (update-ui! #(assoc % :selected-resource
-                            (some-> resource
-                                    (update :type explorer/normalize-resource-type))))]
-    (when permission-changed?
-      (invalidate-child-sections!)
-      (invalidate-counts!)
-      (start-count-jobs!)
-      (restart-expanded-child-section-jobs!))))
+  (let [resource'
+        (some-> resource
+                (update :type explorer/normalize-resource-type))]
+    (transact-query-state!
+     {:selected-resource-type (:type resource')
+      :selected-resource-id (:id resource')}
+     false)
+    (normalize-query-permission!)))
+
+(defn set-cache-enabled!
+  [enabled?]
+  (transact-query-state! {:cache-enabled? (boolean enabled?)}))
+
+(defn toggle-cache!
+  []
+  (set-cache-enabled! (not (:cache-enabled? (query-state)))))
+
+(defn evict-cache!
+  []
+  (when-let [acl (client)]
+    (datascript/expire-cache! acl))
+  (transact-query-state! {})
+  (refresh-cache-metrics!))
 
 (defn set-user-page!
   [page]
@@ -746,6 +1025,8 @@
 (defn set-schema-draft!
   [value]
   (update-ui! #(assoc % :schema-draft value)))
+
+(def schema-presets seed/schema-presets)
 
 (defn toggle-group!
   [resource-type]
@@ -817,6 +1098,14 @@
   []
   (update-ui! #(update % :schema-expanded? not)))
 
+(defn toggle-cache-section!
+  []
+  (let [expanding?
+        (not (get-in @!app [:ui :cache-expanded?]))]
+    (update-ui! #(assoc % :cache-expanded? expanding?))
+    (when expanding?
+      (refresh-cache-metrics-now!))))
+
 (defn- set-bootstrap-state!
   [bootstrap]
   (swap! !app assoc :bootstrap (merge default-bootstrap bootstrap)))
@@ -839,14 +1128,12 @@
                 :schema-error nil})
         (try
           (eacl/write-schema! acl draft)
-          (swap! !app
-                 (fn [app]
-                   (-> app
-                       normalize-ui
-                       (update :bootstrap merge
-                               {:status       :ready
-                                :schema-error nil}))))
+          (swap! !app update :bootstrap merge
+                 {:status       :ready
+                  :schema-error nil})
+          (normalize-query-permission!)
           (restart-expanded-child-section-jobs!)
+          (refresh-cache-metrics!)
           (catch :default ex
             (swap! !app update :bootstrap merge
                    {:status       :ready
@@ -870,7 +1157,7 @@
           :schema-error      (get-in @!app [:bootstrap :schema-error])})
         (invalidate-child-sections!)
         (invalidate-counts!)
-        (letfn [(finish! [status extra]
+                (letfn [(finish! [status extra]
                   (when (and (= status :ready)
                              (nil? (:seed-error extra)))
                     (update-ui! #(-> %
@@ -927,18 +1214,27 @@
         (seed/install-foundation! conn client))
       (let [db' (d/db conn)]
         (reset! !app
-                (assoc (initial-app-state) :ui
-                       (assoc (load-ui-state)
-                              :schema-draft (explorer/schema-source db')))))
+                (assoc-in (initial-app-state)
+                          [:ui :schema-draft]
+                          (explorer/schema-source db')))
+        (let [{:keys [subject-id permission selected-resource cache-enabled?]}
+              (load-query-state)]
+          (transact-query-state!
+           {:subject-id subject-id
+            :permission permission
+            :selected-resource-type (:type selected-resource)
+            :selected-resource-id (:id selected-resource)
+            :cache-enabled? cache-enabled?})))
+      (normalize-query-permission!)
       (register-db-listener!)
       (swap! !app
              (fn [app]
                (-> app
-                   normalize-ui
                    (assoc :counts (explorer/count-state (resource-types)))
                    (assoc :bootstrap
                           (merge default-bootstrap
                                  {:status :ready
                                   :totals (seed/current-totals (d/db conn))})))))
       (persist-ui! @!app)
+      (refresh-cache-metrics-now!)
       (start-count-jobs!))))

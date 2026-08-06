@@ -19,7 +19,7 @@
   (.format count-formatter (long n)))
 
 (defn- pagination-summary
-  [page-start page-end total time]
+  [page-start page-end total]
   (str (if (pos? page-end)
          (str page-start "–" page-end)
          "0")
@@ -27,9 +27,7 @@
        (cond
          (number? total) (format-count total)
          (string? total) total
-         :else           "...")
-       (when time
-         (str " (" (explorer/human-duration time) ")"))))
+         :else           "...")))
 
 (defn- type-class
   [resource-type]
@@ -53,21 +51,31 @@
   {:hit {:label "HIT"
          :class "cache-badge--hit"}
    :miss {:label "MISS"
-          :class "cache-badge--miss"}})
+          :class "cache-badge--miss"}
+   :disabled {:label "CACHE DISABLED"
+              :class "cache-badge--disabled"}})
+
+(defn cache-badge
+  [status]
+  (let [{:keys [label class]}
+        (get cache-badge-spec status
+             (:miss cache-badge-spec))]
+    [:span.cache-badge
+     {:class class
+     :data-cache-status (name (or status :miss))}
+     label]))
 
 (defn cache-timing
   [status time]
-  (let [{:keys [label class]}
-        (get cache-badge-spec status (:miss cache-badge-spec))]
+  (let [duration (cond
+                   (string? time) time
+                   (number? time) (explorer/human-duration time)
+                   :else nil)]
     [:span.cache-timing
      [:span.cache-timing__paren "("]
-     [:span.cache-badge
-      {:class class
-       :data-cache-status (name (or status :miss))}
-      label]
-     (when time
-       [:span.cache-timing__duration
-        (if (string? time) time (explorer/human-duration time))])
+     (cache-badge status)
+     (when duration
+       [:span.cache-timing__duration duration])
      [:span.cache-timing__paren ")"]]))
 
 (defn- selected-resource?
@@ -109,16 +117,14 @@
    [:div.empty-state message]])
 
 (defn- count-text
-  [{:keys [count count-status count-time]}]
+  [{:keys [count count-status]}]
   (cond
     (= "unavailable" count-status)
     "n/a"
 
     (number? count)
     (str (format-count count)
-         (when (= "loading" count-status) "…")
-         (when count-time
-           (str " (" count-time ")")))
+         (when (= "loading" count-status) "…"))
 
     (= "error" count-status)
     "error"
@@ -127,16 +133,16 @@
     "..."))
 
 (defn- range-text
-  [{:keys [page-start page-end count count-status time]}]
+  [{:keys [page-start page-end count count-status]}]
   (let [total (cond
                 (= "unavailable" count-status) "n/a"
                 (number? count) (str (format-count count) (when (= "loading" count-status) "…"))
                 (= "error" count-status) "error"
                 :else "...")]
-    (pagination-summary page-start page-end total time)))
+    (pagination-summary page-start page-end total)))
 
 (defn- section-count-text
-  [{:keys [expanded? page-start page-end total time supported? load-status total-status]}]
+  [{:keys [expanded? page-start page-end total supported? load-status total-status]}]
   (if-not supported?
     "n/a"
     (let [total-text (case total-status
@@ -146,7 +152,7 @@
       (case load-status
         "error" "error"
         "ready" (if expanded?
-                  (pagination-summary page-start page-end total-text time)
+                  (pagination-summary page-start page-end total-text)
                   (if (= "ready" total-status)
                     (str (format-count total) " total")
                     total-text))
@@ -256,9 +262,13 @@
        (type-badge resource-type)
        [:span.group-card__title (str (identifier-token resource-type) "s")]]
       [:div.group-card__stats
-       [:span.group-card__count (count-text group)]
+       [:span.group-card__count
+        (count-text group)
+        (cache-timing (:count-cache-status group) (:count-time group))]
        (when (:expanded? group)
-         [:span.group-card__range (range-text group)])]]
+         [:span.group-card__range
+          (range-text group)
+          (cache-timing (:page-cache-status group) (:time group))])]]
      (when (:expanded? group)
        [:div.group-card__body
         [:div.group-card__meta
@@ -333,8 +343,9 @@
         [:p.section-meta
          (pagination-summary (:page-start user-page)
            (:page-end user-page)
-           (:total user-page)
-           (:time user-page))]]]
+           (:total user-page))
+         (cache-timing (:cache-status user-page)
+                       (:time user-page))]]]
       [:div.pagination-row
        [:button.pagination-button
         {:disabled (not (:has-prev? user-page))
@@ -400,14 +411,16 @@
          [:div.error-block error]
          (if (seq permissions')
            (map-indexed
-            (fn [idx {:keys [permission subjects time error]}]
+            (fn [idx {:keys [permission subjects time error cache-status]}]
               [:div.panel-section {:key (str "detail-permission-" (identifier-token permission) "-" idx)}
                [:div.section-header
                 [:div
                  [:p.panel-label (permission-label permission)]
-                 [:p.section-meta (str (count subjects) " subjects")]]
+                 [:p.section-meta
+                  (str (count subjects) " subjects")]]
                 (when time
-                  [:div.pagination-hint (explorer/human-duration time)])]
+                  [:div.pagination-hint
+                   (cache-timing cache-status time)])]
                (if error
                  [:div.error-block error]
                  (if (seq subjects)
@@ -450,6 +463,21 @@
        label])
     presets)))
 
+(defn schema-panel-heading
+  [panel-data]
+  [:div.panel-heading.schema-shell__header
+   [:button.group-card__toggle
+    {:on-click #(app-state/toggle-schema!)
+     :aria-expanded (boolean (:expanded? panel-data))}
+    [:span.group-card__caret (if (:expanded? panel-data) "▾" "▸")]
+    [:span.group-card__title (schema-heading-title panel-data)]]
+   (when-let [status-text (cond
+                            (:writing? panel-data) "Writing schema"
+                            (:changed? panel-data) "Unsaved changes"
+                            :else nil)]
+     [:div.group-card__stats
+      [:span.section-meta status-text]])])
+
 (rum/defcs schema-panel <
   {:did-mount
    (fn [state]
@@ -462,17 +490,7 @@
   [rum-state panel-data]
   [:div.panel-card.panel-card--graph
    {:class (when-not (:expanded? panel-data) "panel-card--collapsed")}
-   [:div.panel-heading.schema-shell__header
-   [:button.group-card__toggle
-     {:on-click #(app-state/toggle-schema!)}
-     [:span.group-card__caret (if (:expanded? panel-data) "▾" "▸")]
-     [:span.group-card__title (schema-heading-title panel-data)]]
-    (when-let [status-text (cond
-                             (:writing? panel-data) "Writing schema"
-                             (:changed? panel-data) "Unsaved changes"
-                             :else nil)]
-      [:div.group-card__stats
-       [:span.section-meta status-text]])]
+   (schema-panel-heading panel-data)
    (when (:expanded? panel-data)
      [:div.schema-panel
       [:section.schema-panel__pane
@@ -502,6 +520,44 @@
          [:p.panel-label "Schema Graph"]
          [:p.section-meta "Resources, permissions, and relation paths"]]]
        [:div#schema-graph-canvas.graph-canvas]]])])
+
+(defn cache-panel
+  [{:keys [enabled? expanded? metrics]}]
+  [:div.panel-card.cache-panel
+   {:class (when-not expanded? "panel-card--collapsed")}
+   [:div.panel-heading.schema-shell__header
+    [:button.group-card__toggle
+     {:on-click #(app-state/toggle-cache-section!)
+      :aria-expanded (boolean expanded?)
+      :aria-controls "cache-metrics"}
+     [:span.group-card__caret (if expanded? "▾" "▸")]
+     [:span.group-card__title "Cache"]]
+    [:div.cache-controls
+     [:label.cache-toggle
+      [:span.cache-toggle__label "Cache Enabled:"]
+      [:span.cache-switch
+       [:input.cache-switch__input
+        {:type "checkbox"
+         :role "switch"
+         :checked (boolean enabled?)
+         :aria-label "Cache Enabled"
+         :aria-checked (boolean enabled?)
+         :on-change
+         #(app-state/set-cache-enabled!
+           (.. % -target -checked))}]
+       [:span.cache-switch__slider
+        {:aria-hidden true}]]
+      [:span.cache-toggle__state (if enabled? "On" "Off")]]
+     [:button.pagination-button.cache-evict
+      {:type "button"
+       :on-click #(app-state/evict-cache!)}
+      "Evict Cache"]]]
+   (when expanded?
+     [:div#cache-metrics.cache-metrics
+      (if-let [error (:error metrics)]
+        [:div.error-block error]
+        [:pre.cache-metrics__code
+         [:code (or (:edn metrics) "{}")]])])])
 
 (defn- shell-header
   [bootstrap seed-size-input]
@@ -571,17 +627,23 @@
         "Loading detail..."))]])
 
 (defn- subject-view-state
-  [subject-id permission user-page db-rev]
-  {:ui {:subject-id subject-id
-        :permission permission
+  [query-state user-page db-rev]
+  {:ui {:subject-id (:subject-id query-state)
+        :permission (:permission query-state)
+        :selected-resource (:selected-resource query-state)
+        :cache-enabled? (:cache-enabled? query-state)
+        :query-generation (:query-generation query-state)
         :user-page  user-page}
    :db-rev db-rev})
 
 (defn- group-view-state
-  [resource-type subject-id permission group-expanded group-cursors
+  [resource-type query-state group-expanded group-cursors
    expanded-resource-keys expanded-section-keys nested-prev count-entry child-sections db-rev]
-  {:ui {:subject-id             subject-id
-        :permission             permission
+  {:ui {:subject-id             (:subject-id query-state)
+        :permission             (:permission query-state)
+        :selected-resource      (:selected-resource query-state)
+        :cache-enabled?         (:cache-enabled? query-state)
+        :query-generation       (:query-generation query-state)
         :group-expanded         (if (contains? group-expanded resource-type)
                                   #{resource-type}
                                   #{})
@@ -594,10 +656,8 @@
    :db-rev db-rev})
 
 (defn- detail-view-state
-  [subject-id permission selected-resource db-rev]
-  {:ui {:subject-id        subject-id
-        :permission        permission
-        :selected-resource selected-resource}
+  [query-state db-rev]
+  {:ui query-state
    :db-rev db-rev})
 
 (rum/defcs shell-header-view < rum/reactive
@@ -618,7 +678,10 @@
     (when ready?
       [:section.schema-shell
        (schema-panel
-         (assoc (explorer/schema-panel-data db acl {:db-rev db-rev})
+         (assoc (explorer/schema-panel-data
+                 db acl
+                 (assoc (app-state/view-state {:ui {}})
+                        :db-rev db-rev))
            :expanded?      schema-expanded?
            :draft-text     schema-draft
            :schema-presets app-state/schema-presets
@@ -628,23 +691,51 @@
                                 (= schema-draft (explorer/schema-source db)))
            :error          (:schema-error bootstrap)))])))
 
+(def cache-metrics-poll-ms 500)
+
+(def cache-metrics-polling
+  {:did-mount
+   (fn [state]
+     (assoc state
+            ::cache-metrics-timer
+            (js/setInterval
+             (fn []
+               (when (get-in @app-state/!app [:ui :cache-expanded?])
+                 (app-state/refresh-cache-metrics-now!)))
+             cache-metrics-poll-ms)))
+   :will-unmount
+   (fn [state]
+     (when-let [timer (::cache-metrics-timer state)]
+       (js/clearInterval timer))
+     (dissoc state ::cache-metrics-timer))})
+
+(rum/defcs cache-shell-view < rum/reactive cache-metrics-polling
+  [rum-state]
+  (let [_db-rev (rum/react (rum/cursor-in app-state/!app [:db-rev]))
+        expanded?
+        (boolean
+         (rum/react
+          (rum/cursor-in app-state/!app [:ui :cache-expanded?])))
+        metrics
+        (rum/react (rum/cursor-in app-state/!app [:cache-metrics]))
+        enabled? (:cache-enabled? (app-state/query-state))]
+    [:section.schema-shell.cache-shell
+     (cache-panel {:enabled? enabled?
+                   :expanded? expanded?
+                   :metrics metrics})]))
+
 (rum/defcs subject-panel-view < rum/reactive
   [rum-state]
   (let [db            (app-state/db)
         acl           (app-state/client)
-        subject-id    (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission    (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
-                              explorer/normalize-permission-name)
-        selected-resource (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
-                                  (update :type explorer/normalize-resource-type))
         user-page     (rum/react (rum/cursor-in app-state/!app [:ui :user-page]))
         db-rev        (rum/react (rum/cursor-in app-state/!app [:db-rev]))
-        view-state    (assoc (subject-view-state subject-id permission user-page db-rev)
-                        :ui {:subject-id        subject-id
-                             :permission        permission
-                             :user-page         user-page
-                             :selected-resource selected-resource})
+        query-state   (app-state/query-state)
+        subject-id    (:subject-id query-state)
+        permission    (:permission query-state)
+        view-state    (subject-view-state query-state user-page db-rev)
         subject-data  (explorer/paged-known-users db nil acl view-state)]
+    (app-state/refresh-cache-metrics!)
     (subject-panel {:current-subject subject-id
                     :permission      permission
                     :permissions     (explorer/selectable-permissions db acl view-state)
@@ -655,9 +746,10 @@
   [rum-state resource-type]
   (let [db                     (app-state/db)
         acl                    (app-state/client)
-        subject-id             (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission             (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
-                                       explorer/normalize-permission-name)
+        _selection-rev         (rum/react
+                                (rum/cursor-in app-state/!app
+                                               [:selection-rev]))
+        query-state            (app-state/query-state)
         group-expanded         (rum/react (rum/cursor-in app-state/!app [:ui :group-expanded]))
         group-cursors          (rum/react (rum/cursor-in app-state/!app [:ui :group-prev resource-type]))
         expanded-resource-keys (rum/react (rum/cursor-in app-state/!app [:ui :expanded-resource-keys]))
@@ -665,12 +757,10 @@
         nested-prev            (rum/react (rum/cursor-in app-state/!app [:ui :nested-prev]))
         count-entry            (rum/react (rum/cursor-in app-state/!app [:counts resource-type]))
         child-sections         (rum/react (rum/cursor-in app-state/!app [:child-sections]))
-        selected-resource      (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
-                                       (update :type explorer/normalize-resource-type))
+        selected-resource      (:selected-resource query-state)
         db-rev                 (rum/react (rum/cursor-in app-state/!app [:db-rev]))
         view-state             (group-view-state resource-type
-                                 subject-id
-                                 permission
+                                 query-state
                                  group-expanded
                                  group-cursors
                                  expanded-resource-keys
@@ -679,15 +769,14 @@
                                  count-entry
                                  child-sections
                                  db-rev)]
+    (app-state/refresh-cache-metrics!)
     (render-group selected-resource
       (explorer/group-data db acl view-state resource-type))))
 
 (rum/defcs resource-panel-view < rum/reactive
   [rum-state]
-  (let [subject-id      (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission      (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
-                                explorer/normalize-permission-name)
-        db-rev          (rum/react (rum/cursor-in app-state/!app [:db-rev]))
+  (let [db-rev          (rum/react (rum/cursor-in app-state/!app [:db-rev]))
+        {:keys [subject-id permission]} (app-state/query-state)
         resource-types  (->> (explorer/query-resource-types (app-state/db) (app-state/client))
                              (keep explorer/normalize-resource-type)
                              distinct
@@ -709,15 +798,17 @@
   [rum-state]
   (let [db                (app-state/db)
         acl               (app-state/client)
-        subject-id        (rum/react (rum/cursor-in app-state/!app [:ui :subject-id]))
-        permission        (some-> (rum/react (rum/cursor-in app-state/!app [:ui :permission]))
-                                  explorer/normalize-permission-name)
-        selected-resource (some-> (rum/react (rum/cursor-in app-state/!app [:ui :selected-resource]))
-                                  (update :type explorer/normalize-resource-type))
+        _selection-rev     (rum/react
+                            (rum/cursor-in app-state/!app
+                                           [:selection-rev]))
         db-rev            (rum/react (rum/cursor-in app-state/!app [:db-rev]))
-        detail-data       (assoc (explorer/resource-detail-data db acl
-                                   (detail-view-state subject-id permission selected-resource db-rev))
-                            :current-subject subject-id)]
+        query-state       (app-state/query-state)
+        detail-data       (assoc
+                           (explorer/resource-detail-data
+                            db acl
+                            (detail-view-state query-state db-rev))
+                           :current-subject (:subject-id query-state))]
+    (app-state/refresh-cache-metrics!)
     (detail-panel detail-data)))
 
 (rum/defcs app-body-view < rum/reactive
@@ -755,6 +846,7 @@
   [:div.app-shell
    (shell-header-view)
    (schema-shell-view)
+   (cache-shell-view)
    (app-body-view)
    (app-footer)])
 
