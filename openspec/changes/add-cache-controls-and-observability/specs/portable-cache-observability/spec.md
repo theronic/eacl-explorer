@@ -62,3 +62,23 @@ EACL DataScript SHALL expose public backend APIs for inspecting and expiring the
 - **WHEN** a caller evaluates cache-aware queries through a DataScript client
 - **THEN** `eacl.datascript.core/cache-stats` reflects native completed-answer cache operations
 - **AND** `eacl.datascript.core/expire-cache!` makes prior native entries unreachable
+
+### Requirement: Native subproblem eviction remains bounded under saturation
+EACL's weighted native subproblem cache SHALL preserve LRU eviction order without scanning every resident entry for each victim. Access-history storage SHALL remain bounded through compaction, and additive telemetry SHALL expose eviction-victim probes.
+
+#### Scenario: Full projection tier
+- **WHEN** admitting a projection into a full tier requires one ordinary LRU victim
+- **THEN** the oldest eligible entry is evicted
+- **AND** the eviction requires one current-entry victim probe when no in-flight or stale access record precedes it
+- **AND** repeated hits cannot grow the active access log without bound
+
+### Requirement: Authenticated page identity excludes cursor transport
+EACL's completed lookup-page cache SHALL identify a page by its normalized
+non-page query and authenticated internal boundary. Signed cursor transport
+and current-snapshot recovery instructions SHALL NOT fragment otherwise
+identical managed entries.
+
+#### Scenario: Unrelated transaction changes cursor transport
+- **WHEN** an unrelated transaction causes the same authenticated internal page boundary to be signed for a newer current snapshot
+- **THEN** the recovered request remains eligible for the prior managed page
+- **AND** a different internal boundary, page size, direction, or query remains a different cache identity

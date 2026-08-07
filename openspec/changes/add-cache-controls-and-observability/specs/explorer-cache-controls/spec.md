@@ -93,3 +93,11 @@ Enabling, disabling, observing, or evicting the cache SHALL NOT change the data,
 #### Scenario: Compare cached and bypassed results
 - **WHEN** the same query is evaluated with caching enabled and with caching disabled against the same selected DataScript value
 - **THEN** the result payloads are equal after removing cache provenance and timing fields
+
+### Requirement: Explorer cache capacity supports benchmark-scale local data
+EACL Explorer SHALL configure its singleton DataScript client with a bounded projection-cache working set sized for the documented 50k–100k local server workflow without changing completed-answer or denotation-cache semantics.
+
+#### Scenario: Runtime projection budget
+- **WHEN** the Explorer runtime creates its EACL client
+- **THEN** both exact and managed projection stores report a 32 MiB maximum weight
+- **AND** the configured stores remain bounded and observable through the cache metrics panel

@@ -120,8 +120,16 @@
                  :first 20}]
     (seed/install-schema+fixtures! conn client {:seed/profile :smoke})
     (is (false? (:cached? (eacl/lookup-resources client request))))
-    (is (pos? (+ (:exact-entries (datascript/cache-stats client))
-                 (:managed-entries (datascript/cache-stats client)))))
+    (let [stats (datascript/cache-stats client)]
+      (is (pos? (+ (:exact-entries stats)
+                   (:managed-entries stats))))
+      (is (= seed/explorer-projection-cache-max-weight
+             (get-in stats
+                     [:subproblems :tiers :projection :max-weight])))
+      (is (= seed/explorer-projection-cache-max-weight
+             (get-in stats
+                     [:managed-subproblems :tiers
+                      :projection :max-weight]))))
     (is (true? (:cached? (eacl/lookup-resources client request))))
     (datascript/expire-cache! client)
     (is (zero? (+ (:exact-entries (datascript/cache-stats client))

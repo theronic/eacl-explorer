@@ -39,3 +39,11 @@
 - [x] 5.2 Add explorer integration tests proving first enabled calls show misses, unchanged repeats show hits, disabled calls neither read nor write the store, re-enabling can reuse retained entries, and eviction makes the next enabled results miss.
 - [x] 5.3 Run the main EACL Explorer ClojureScript test namespaces and compile both browser builds through nREPL.
 - [x] 5.4 Manually verify in the browser that all visible query surfaces update immediately across enable, disable, re-enable, and eviction; confirm the cache disclosure is compact when collapsed, metrics occupancy/evictions, switch state, and badge transitions match the store.
+
+## 6. Saturated Cache Performance
+
+- [x] 6.1 Reproduce the cache-enabled append regression with a full managed projection tier and record cache-on, bypass, page, eviction, and victim-probe telemetry.
+- [x] 6.2 Replace EACL's repeated full-tier LRU victim scans with an exact ordered access log, amortized constant-time touches, bounded compaction, and deterministic regression tests.
+- [x] 6.3 Configure the Explorer's singleton EACL client with a bounded 32 MiB projection working set for 50k–100k local datasets and advance both EACL dependency SHAs.
+- [x] 6.4 Normalize completed lookup-page keys after cursor authentication so signed snapshot transport and recovery instructions do not fragment identical pages; retain the internal boundary and prove its separation in Dafny.
+- [x] 6.5 Re-run EACL CLJ/CLJS and formal verification, the Explorer browser suite, and the saturated append/page/subject-switch browser acceptance flow.

@@ -105,6 +105,38 @@ Counters remain cumulative across `clear!`, while current occupancy becomes zero
 
 The cache controls and metrics disclosure will sit in a dedicated, compact collapsible section near the existing schema disclosure. Its enabled control uses a labelled slider-style switch with explicit on/off text. Badges appear in the result's timing suffix, immediately before the duration, except for the schema editor disclosure. Text labels carry the meaning, with green/orange/red styling as reinforcement, so the state is not communicated by color alone. While the metrics disclosure is open, the provider-native snapshot is polled independently so counters remain visibly current without transacting DataScript or rerunning authorization queries.
 
+### 8. Bound saturated subproblem-cache work
+
+EACL v8 has two distinct native cache layers. Completed count/page answers are
+small, but their cold computations also populate a weighted cache of internal
+relationship projections. The initial 4 MiB projection budget can hold
+thousands of mixed-size entries. Its original LRU eviction selected every
+victim by scanning the complete tier, so a cold count after relationship
+appends repeatedly walked thousands of now-cold entries and blocked the
+ClojureScript event loop.
+
+The shared subproblem cache will retain exact LRU semantics with an ordered
+access log. Hits append an access stamp in amortized constant time; eviction
+advances from the oldest current stamp; stale stamps are compacted after a
+bounded amount of access churn. Metrics expose both victim count and probe
+count so the implementation can be tested without fragile wall-clock
+assertions.
+
+The Explorer client will additionally use a 32 MiB projection budget. This
+keeps the expected 50k–100k local demo working set out of avoidable capacity
+churn while remaining bounded. Exact and managed projection generations may
+each reach that configured cap, so the browser trades at most 64 MiB of
+projection-cache capacity for predictable local performance. Completed-answer
+capacity and denotation budgets remain unchanged.
+
+Authenticated page cache identity uses the normalized non-page query plus the
+authenticated internal boundary. Signed cursor transport and its current
+snapshot recovery marker are execution metadata: unrelated Explorer UI
+transactions can change both without changing the page. Excluding those two
+fields lets pages remain reusable after a subject switch, while the internal
+boundary, page size, direction, permission dependencies, and schema stamp
+continue to separate semantically different or stale answers.
+
 ## Risks / Trade-offs
 
 - **[Cross-repository sequencing]** The explorer depends on EACL by git SHA, while these specs live in `eacl-explorer` as requested. → Land and test the additive EACL API first, then advance both EACL dependency SHAs in the explorer before its UI changes.
@@ -113,6 +145,8 @@ The cache controls and metrics disclosure will sit in a dedicated, compact colla
 - **[Mixed-call results can overstate reuse]** A child section may combine relationship reads and many permission checks. → Apply the conservative aggregate rule: any direct work or miss makes the displayed result a miss.
 - **[Eviction refresh immediately repopulates the cache]** Expiring while caching is enabled causes visible queries to write fresh entries. → Define the button as “expire then refresh”; tests assert zero native entries immediately after `expire-cache!` and misses on the first refreshed results, not a permanently empty cache.
 - **[Portable and Datomic stats differ]** Provider-native metrics are intentionally not identical. → Keep the EDN renderer generic and require only the portable local-store additions used by this demo.
+- **[A larger browser projection working set uses more memory]** The Explorer is explicitly a 50k–100k local-load harness, and the exact and managed projection tiers can each use the configured 32 MiB cap. → Keep the cap explicit and tested, retain weighted eviction, and preserve the cache toggle/eviction controls for low-memory diagnosis.
+- **[Cursor normalization could alias pages]** Only authenticated transport and the `:rebase?` execution marker are removed. → Keep the authenticated internal boundary and all non-page query fields in the key, prove that distinction in the current-cache model, and test both same-bound reuse and different-bound separation.
 
 ## Migration Plan
 

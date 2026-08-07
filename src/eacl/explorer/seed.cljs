@@ -99,9 +99,17 @@
                    :explorer.ui/query-generation 0}])
     conn'))
 
+(def explorer-projection-cache-max-weight
+  (* 32 1024 1024))
+
 (defn make-client
   [conn]
-  (datascript/make-client conn {:coherence-authority :managed}))
+  (datascript/make-client
+   conn
+   {:coherence-authority :managed
+    :cache
+    {:subproblem-cache
+     {:projection-max-weight explorer-projection-cache-max-weight}}}))
 
 (defonce conn (create-conn))
 (defonce client (make-client conn))
