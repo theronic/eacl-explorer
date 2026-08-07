@@ -1,5 +1,6 @@
 (ns eacl.explorer.explorer
-  (:require [clojure.string :as str]
+  (:require [cljs.pprint :as pprint]
+            [clojure.string :as str]
             [datascript.core :as d]
             [eacl.core :as eacl]
             [eacl.spicedb.consistency :as consistency]
@@ -106,8 +107,66 @@
    :expanded-section-keys  #{}
    :nested-prev            {}
    :schema-expanded?       false
+   :cache-expanded?        false
    :schema-draft           seed/multipath-schema-dsl
    :seed-size-input        (str seed/default-seed-size)})
+
+(defn cache-enabled?
+  [state]
+  (let [value
+        (cond
+          (contains? state :cache-enabled?)
+          (:cache-enabled? state)
+
+          (contains? (:ui state) :cache-enabled?)
+          (get-in state [:ui :cache-enabled?])
+
+          (contains? state :cache?)
+          (:cache? state)
+
+          :else
+          true)]
+    (not (false? value))))
+
+(defn cache-request
+  [state request]
+  (assoc request :cache? (cache-enabled? state)))
+
+(defn cache-status
+  [state cached?]
+  (cond
+    (not (cache-enabled? state)) :disabled
+    (true? cached?) :hit
+    :else :miss))
+
+(defn response-provenance
+  [state response]
+  (assoc response :cache-status (cache-status state (:cached? response))))
+
+(defn direct-result
+  [state]
+  {:cache-status (cache-status state false)})
+
+(defn normalized-cache-status
+  [state status]
+  (if-not (cache-enabled? state)
+    :disabled
+    (if (#{:hit :miss} status)
+      status
+      :miss)))
+
+(defn aggregate-cache-status
+  [state statuses]
+  (if-not (cache-enabled? state)
+    :disabled
+    (if (and (seq statuses)
+             (every? #{:hit} statuses))
+      :hit
+      :miss)))
+
+(defn metrics-edn
+  [metrics]
+  (with-out-str (pprint/pprint (or metrics {}))))
 
 (defn count-state
   [resource-types]
@@ -513,33 +572,53 @@
        (hydrate-objects db)
        sort-resources))
 
+(defn next-page-cursor
+  [{:keys [page-info]}]
+  (when (:has-next-page? page-info)
+    (:end-cursor page-info)))
+
 (defn- known-user-id-stream
-  [db acl]
-  (->> (concat
-        (when acl
+  [db acl state]
+  (let [{:keys [ids statuses]}
+        (if acl
           (loop [cursor-token nil
                  seen-cursors #{}
-                 relationships []]
-            (let [{:keys [data cursor]}
-                  (eacl/read-relationships acl
-                                           (cond-> {:subject/type :user
-                                                    :limit        1000}
-                                             cursor-token (assoc :cursor cursor-token)))
-                  relationships' (into relationships data)
-                  repeated?      (or (nil? cursor)
-                                     (contains? seen-cursors cursor))]
-              (if (and (= 1000 (count data))
-                       (not repeated?))
+                 relationship-ids []
+                 statuses []]
+            (let [{:keys [data] :as result}
+                  (eacl/read-relationships
+                   acl
+                   (cache-request
+                    state
+                    (cond-> {:subject/type :user
+                             :first        1000}
+                      cursor-token (assoc :after cursor-token))))
+                  cursor          (next-page-cursor result)
+                  ids'            (into relationship-ids
+                                    (map (comp :id :subject))
+                                    data)
+                  statuses'       (conj statuses
+                                    (:cache-status (direct-result state)))
+                  repeated?       (or (nil? cursor)
+                                      (contains? seen-cursors cursor))]
+              (if-not repeated?
                 (recur cursor
                        (conj seen-cursors cursor)
-                       relationships')
-                (map (comp :id :subject) relationships')))))
+                       ids'
+                       statuses')
+                {:ids ids'
+                 :statuses statuses'})))
+          {:ids []
+           :statuses []})
+        quick-ids
         (keep (fn [{:keys [id]}]
                 (when (d/entid db [:eacl/id id])
                   id))
-              quick-subjects))
-       distinct
-       (sort-by user-sort-key)))
+              quick-subjects)]
+    {:ids (->> (concat ids quick-ids)
+               distinct
+               (sort-by user-sort-key))
+     :cache-status (aggregate-cache-status state statuses)}))
 
 (defn paged-known-users
   [db _client acl state]
@@ -547,7 +626,8 @@
                                         (:user-page state)
                                         0)))
         started-at     (now-nanos)
-        all-users      (vec (known-user-id-stream db acl))
+        {:keys [ids cache-status]} (known-user-id-stream db acl state)
+        all-users      (vec ids)
         total          (count all-users)
         max-page       (max 0 (long (quot (max 0 (dec total)) user-page-size)))
         effective-page (min requested-page max-page)
@@ -562,24 +642,31 @@
      :has-prev?  (pos? effective-page)
      :has-next?  (< end total)
      :page-start (if (seq page-users) (inc offset) 0)
-     :page-end   end}))
+     :page-end   end
+     :cache-status cache-status}))
 
 (defn try-lookup-resources
   [db acl query]
   (let [started-at (now-nanos)]
     (try
-      (let [{:keys [data cursor] :as result}
+      (let [{:keys [data] :as result}
             (eacl/lookup-resources acl
-              (assoc query :consistency consistency/fully-consistent))]
-        (assoc result
-          :items (hydrate-objects db data)
-          :time  (- (now-nanos) started-at)))
+              (assoc query :consistency consistency/fully-consistent))
+            cursor (next-page-cursor result)]
+        (response-provenance
+         query
+         (assoc result
+                :items (hydrate-objects db data)
+                :cursor cursor
+                :time  (- (now-nanos) started-at))))
       (catch :default ex
-        {:items  []
-         :data   []
-         :cursor nil
-         :error  (ex-message ex)
-         :time   (- (now-nanos) started-at)}))))
+        (merge
+         (direct-result query)
+         {:items  []
+          :data   []
+          :cursor nil
+          :error  (ex-message ex)
+          :time   (- (now-nanos) started-at)})))))
 
 (defn try-count-resources
   [acl query]
@@ -587,12 +674,16 @@
     (try
       (let [result (eacl/count-resources acl
                      (assoc query :consistency consistency/fully-consistent))]
-        (assoc result :time (- (now-nanos) started-at)))
+        (response-provenance
+         query
+         (assoc result :time (- (now-nanos) started-at))))
       (catch :default ex
-        {:count  0
-         :cursor nil
-         :error  (ex-message ex)
-         :time   (- (now-nanos) started-at)}))))
+        (merge
+         (direct-result query)
+         {:count  0
+          :cursor nil
+          :error  (ex-message ex)
+          :time   (- (now-nanos) started-at)})))))
 
 (defn- permission-notice
   [permission resource-type]
@@ -616,16 +707,24 @@
              :count         (if supported? (:count count-entry) 0)
              :count-status  (if supported? (:status count-entry) "unavailable")
              :count-time    (:time count-entry)
+             :count-cache-status
+             (normalized-cache-status state (:cache-status count-entry))
              :page-number   (group-page-number state resource-type)}
       expanded?
       (merge
        (if supported?
-         (let [result     (try-lookup-resources db acl
-                            {:subject       (seed/->user (current-subject-id state))
-                             :permission    permission
-                             :resource/type resource-type
-                             :cursor        (current-group-cursor state resource-type)
-                             :limit         resource-page-size})
+         (let [cursor-token (current-group-cursor state resource-type)
+               result     (try-lookup-resources
+                           db
+                           acl
+                           (cache-request
+                            state
+                            (cond-> {:subject
+                                     (seed/->user (current-subject-id state))
+                                     :permission permission
+                                     :resource/type resource-type
+                                     :first resource-page-size}
+                              cursor-token (assoc :after cursor-token))))
                item-count (count (:items result))
                start      (if (pos? item-count)
                             (inc (* resource-page-size (dec (group-page-number state resource-type))))
@@ -635,11 +734,15 @@
             :items       (:items result)
             :next-cursor (:cursor result)
             :error       (:error result)
+            :page-cache-status
+            (normalized-cache-status state (:cache-status result))
             :time        (:time result)})
          {:page-start  0
           :page-end    0
           :items       []
           :next-cursor nil
+          :page-cache-status
+          (:cache-status (direct-result state))
           :time        nil})))))
 
 (declare build-resource-node)
@@ -719,6 +822,8 @@
              :notice        (when-not supported?
                               (permission-notice permission resource-type))
              :total         (when ready? total)
+             :cache-status
+             (normalized-cache-status state (:cache-status entry))
              :time          (:time entry)}
       (= "error" status)
       (assoc :error (:error entry))
@@ -789,37 +894,51 @@
   (if-let [resource (selected-resource state)]
     (if-not (resource-exists? db resource)
       {:resource resource
-       :error    (str "Resource " (:id resource) " could not be resolved.")}
+       :error    (str "Resource " (:id resource) " could not be resolved.")
+       :cache-status (:cache-status (direct-result state))}
       (let [resource-ref (object-ref (:type resource) (:id resource))
-            hydrated     (hydrate-resource db resource)]
+            hydrated     (hydrate-resource db resource)
+            permission-results
+            (mapv
+             (fn [permission]
+               (let [started-at (now-nanos)]
+                 (try
+                   (let [{:keys [data] :as result}
+                         (eacl/lookup-subjects
+                          acl
+                          (cache-request
+                           state
+                           {:resource resource-ref
+                            :permission permission
+                            :subject/type :user
+                            :consistency
+                            consistency/fully-consistent}))]
+                     {:permission permission
+                      :subjects (->> data (sort-by :id) vec)
+                      :cache-status
+                      (cache-status state (:cached? result))
+                      :time (- (now-nanos) started-at)})
+                   (catch :default ex
+                     {:permission permission
+                      :subjects []
+                      :error (ex-message ex)
+                      :cache-status
+                      (:cache-status (direct-result state))
+                      :time (- (now-nanos) started-at)}))))
+             (permissions-for-resource-from-schema db acl (:type resource)))]
         {:resource hydrated
-         :permissions
-         (mapv (fn [permission]
-                 (let [started-at (now-nanos)]
-                   (try
-                     (let [{:keys [data]}
-                           (eacl/lookup-subjects acl
-                             {:resource     resource-ref
-                              :permission   permission
-                              :subject/type :user
-                              :consistency  consistency/fully-consistent})]
-                       {:permission permission
-                        :subjects   (->> data
-                                         (sort-by :id)
-                                         vec)
-                        :time       (- (now-nanos) started-at)})
-                     (catch :default ex
-                       {:permission permission
-                        :subjects   []
-                        :error      (ex-message ex)
-                        :time       (- (now-nanos) started-at)}))))
-           (permissions-for-resource-from-schema db acl (:type resource)))}))
-    {:resource nil}))
+         :permissions permission-results
+         :cache-status
+         (aggregate-cache-status
+          state
+          (map :cache-status permission-results))}))
+    {:resource nil
+     :cache-status (:cache-status (direct-result state))}))
 
 (defn schema-panel-data
   ([db acl]
    (schema-panel-data db acl nil))
-  ([db acl _state]
+  ([db acl state]
    (let [{:keys [relations permissions]} (schema-data acl)
          distinct-permissions
          (->> permissions
@@ -907,7 +1026,8 @@
      {:schema-text (schema-source db)
       :resource-count (count resource-kinds)
       :relation-count (count relations)
-      :permission-count (count distinct-permissions)
+     :permission-count (count distinct-permissions)
+      :cache-status (:cache-status (direct-result state))
       :nodes       (vec (concat resource-nodes permission-nodes))
       :links       (vec (concat relation-links definition-links permission-links))})))
 

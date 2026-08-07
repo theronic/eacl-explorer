@@ -4,13 +4,17 @@ Browser-only EACL explorer using:
 
 - Rum for rendering
 - DataScript for local storage and querying
-- EACL v7 + `eacl-datascript` for authorization
+- EACL v8 + `eacl-datascript` for authorization
 - `shadow-cljs` for the browser build
 
 The explorer boots with the default Spice schema and root subjects in-browser at
 `http://localhost:18091/index.html`.
 Use the `Seed DB` control in the header to append benchmark-shaped data into the
 live DataScript database. The default seed size is `10,000` servers.
+
+`resources/public/EaclKernel.browser.js` is the generated browser authority
+bundled by the pinned EACL release. When upgrading EACL, replace it with the
+matching `released-generated-runtimes` artifact from a successful EACL CI run.
 
 ## Development
 

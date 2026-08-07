@@ -8,6 +8,7 @@
 
 (def seed-version 2)
 (def seed-marker-id "eacl-explorer/seed-state")
+(def ui-state-marker-id "eacl-explorer/ui-state")
 (def root-user-count 3)
 (def default-seed-size 10000)
 
@@ -17,7 +18,7 @@
    :vpcs-per-acct          2
    :servers-per-batch      500
    :servers-per-acct       2000
-   :primary-owned-accounts 2})
+   :primary-owned-accounts 4})
 
 (defn- requested-seed-profile
   []
@@ -58,10 +59,27 @@
    :seed/total-servers {}
    :seed/total-users   {}
    :seed/next-account-n {}
-   :seed/seed-runs      {}})
+   :seed/seed-runs      {}
+   :explorer.ui/subject-id {}
+   :explorer.ui/permission {}
+   :explorer.ui/selected-resource-type {}
+   :explorer.ui/selected-resource-id {}
+   :explorer.ui/cache-enabled? {}
+   :explorer.ui/query-generation {}})
 
 (def multipath-schema-dsl
   (inline-resource "eacl/explorer/default-schema.zed"))
+
+(def recursive-schema-dsl
+  (inline-resource "eacl/explorer/recursive-schema.zed"))
+
+(def schema-presets
+  [{:id :non-recursive
+    :label "Non-recursive"
+    :schema multipath-schema-dsl}
+   {:id :recursive
+    :label "Recursive"
+    :schema recursive-schema-dsl}])
 
 (def ->user (partial spice-object :user))
 (def ->team (partial spice-object :team))
@@ -72,13 +90,26 @@
 
 (defn create-conn
   []
-  (datascript/create-conn extra-schema))
+  (let [conn' (datascript/create-conn extra-schema)]
+    (d/transact! conn'
+                 [{:eacl/id ui-state-marker-id
+                   :explorer.ui/subject-id "user-1"
+                   :explorer.ui/permission :view
+                   :explorer.ui/cache-enabled? true
+                   :explorer.ui/query-generation 0}])
+    conn'))
+
+(def explorer-projection-cache-max-weight
+  (* 32 1024 1024))
 
 (defn make-client
   [conn]
-  (datascript/make-client conn
-    {:entity->object-id     (fn [entity] (:eacl/id entity))
-     :object-id->lookup-ref (fn [object-id] [:eacl/id object-id])}))
+  (datascript/make-client
+   conn
+   {:coherence-authority :managed
+    :cache
+    {:subproblem-cache
+     {:projection-max-weight explorer-projection-cache-max-weight}}}))
 
 (defonce conn (create-conn))
 (defonce client (make-client conn))

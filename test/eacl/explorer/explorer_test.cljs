@@ -3,6 +3,7 @@
             [clojure.set :as set]
             [datascript.core :as d]
             [eacl.core :as eacl]
+            [eacl.datascript.core :as datascript]
             [eacl.explorer.explorer :as explorer]
             [eacl.explorer.seed :as seed]
             [eacl.explorer.support :as support]))
@@ -17,7 +18,137 @@
    {:ui             (merge explorer/default-ui-state ui)
     :counts         counts
     :child-sections child-sections
-    :db-rev         db-rev}))
+   :db-rev         db-rev}))
+
+(deftest cache-provenance-normalization-is-deterministic
+  (is (= true (:cache? (explorer/cache-request
+                        {:cache-enabled? true}
+                        {:resource/type :server}))))
+  (is (= false (:cache? (explorer/cache-request
+                         {:cache-enabled? false}
+                         {:resource/type :server}))))
+  (is (= :miss (explorer/cache-status {:cache-enabled? true} false)))
+  (is (= :hit (explorer/cache-status {:cache-enabled? true} true)))
+  (is (= :disabled
+         (explorer/cache-status {:cache-enabled? false} true)))
+  (is (= :disabled
+         (explorer/normalized-cache-status
+          {:cache-enabled? false}
+          :hit)))
+  (is (= :miss
+         (explorer/normalized-cache-status
+          {:cache-enabled? true}
+          nil))))
+
+(deftest aggregate-cache-provenance-requires-at-least-one-all-hit-call
+  (is (= :hit
+         (explorer/aggregate-cache-status
+          {:cache-enabled? true}
+          [:hit :hit])))
+  (is (= :miss
+         (explorer/aggregate-cache-status
+          {:cache-enabled? true}
+          [:hit :miss])))
+  (is (= :miss
+         (explorer/aggregate-cache-status
+          {:cache-enabled? true}
+          [])))
+  (is (= :disabled
+         (explorer/aggregate-cache-status
+          {:cache-enabled? false}
+          [:hit :hit]))))
+
+(deftest metrics-are-pretty-printed-as-edn
+  (let [rendered (explorer/metrics-edn
+                  {:enabled? true
+                   :provider {:entries 2
+                              :tiers {:local {:entries 2
+                                              :max-entries 10}}}})]
+    (is (re-find #":enabled[?] true" rendered))
+    (is (re-find #":entries 2" rendered))
+    (is (re-find #":max-entries 10" rendered))))
+
+(deftest cache-lifecycle-is-visible-in-result-provenance
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [request {:subject (seed/->user "user-1")
+                     :permission :view
+                     :resource/type :server
+                     :first explorer/resource-page-size}
+            enabled-request (explorer/cache-request
+                             {:cache-enabled? true}
+                             request)
+            first-result (explorer/try-lookup-resources
+                          (d/db conn) client enabled-request)
+            second-result (explorer/try-lookup-resources
+                           (d/db conn) client enabled-request)
+            metrics-before-bypass (datascript/cache-stats client)
+            disabled-result (explorer/try-lookup-resources
+                             (d/db conn)
+                             client
+                             (explorer/cache-request
+                              {:cache-enabled? false}
+                              request))
+            metrics-after-bypass (datascript/cache-stats client)
+            re-enabled-result (explorer/try-lookup-resources
+                               (d/db conn) client enabled-request)]
+        (is (= :miss (:cache-status first-result)))
+        (is (= :hit (:cache-status second-result)))
+        (is (= :disabled (:cache-status disabled-result)))
+        (is (= (select-keys first-result
+                            [:data :items :cursor :page-info])
+               (select-keys disabled-result
+                            [:data :items :cursor :page-info])))
+        (is (= (update metrics-before-bypass :bypasses inc)
+               metrics-after-bypass))
+        (is (= :hit (:cache-status re-enabled-result)))
+        (datascript/expire-cache! client)
+        (is (zero? (+ (:exact-entries (datascript/cache-stats client))
+                      (:managed-entries (datascript/cache-stats client)))))
+        (is (= :miss
+               (:cache-status
+                (explorer/try-lookup-resources
+                 (d/db conn) client enabled-request))))))))
+
+(deftest direct-empty-error-and-unavailable-results-preserve-provenance
+  (support/with-test-runtime* :smoke
+    (fn [{:keys [conn client]}]
+      (let [db (d/db conn)
+            disabled-state
+            (app-state {:cache-enabled? false
+                        :permission :not-defined
+                        :group-expanded #{:account}})
+            unavailable-group
+            (explorer/top-level-group-data
+             db client disabled-state :account)]
+        (is (= :disabled
+               (:cache-status
+                (explorer/paged-known-users
+                 db nil client disabled-state))))
+        (is (= :disabled
+               (:cache-status
+                (explorer/schema-panel-data
+                 db client disabled-state))))
+        (is (= :disabled
+               (:cache-status
+                (explorer/resource-detail-data
+                 db client disabled-state))))
+        (is (= "unavailable" (:count-status unavailable-group)))
+        (is (= :disabled (:count-cache-status unavailable-group)))
+        (is (= :disabled (:page-cache-status unavailable-group)))
+        (with-redefs [eacl/count-resources
+                      (fn [& _]
+                        (throw (js/Error. "count failed")))]
+          (is (= :miss
+                 (:cache-status
+                  (explorer/try-count-resources
+                   client
+                   {:cache? true}))))
+          (is (= :disabled
+                 (:cache-status
+                  (explorer/try-count-resources
+                   client
+                   {:cache? false})))))))))
 
 (deftest known-user-directory-pages-from-live-eacl-data
   (support/with-test-runtime* :smoke
@@ -62,12 +193,18 @@
     (seed/install-foundation! conn client)
     (doseq [batch (:batches (seed/seed-more-plan (d/db conn) 4500))]
       (seed/execute-batch! conn client batch))
-    (with-redefs [d/q (fn [& _]
-                        (throw (js/Error. "paged-known-users should not use datascript.core/q")))]
-      (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
-        (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
-        (is (some #{"owner-0001"} items))
-        (is (some #{"shared-admin-0001-01"} items))))))
+    (let [calls              (atom [])
+          read-relationships eacl/read-relationships]
+      (with-redefs [eacl/read-relationships
+                    (fn [acl query]
+                      (swap! calls conj query)
+                      (read-relationships acl query))]
+        (let [items (:items (explorer/paged-known-users (d/db conn) nil client (app-state {:user-page 0})))]
+          (is (seq @calls))
+          (is (every? #(= :user (:subject/type %)) @calls))
+          (is (= ["super-user" "user-1" "user-2"] (take 3 items)))
+          (is (some #{"owner-0001"} items))
+          (is (some #{"shared-admin-0001-01"} items)))))))
 
 (deftest resource-columns-render-against-foundation-only-runtime
   (let [{:keys [conn client]} (seed/create-runtime)]
@@ -115,7 +252,7 @@
                                                                                              :subject/id        "account-0001"
                                                                                              :resource/type     :server
                                                                                              :resource/relation :account
-                                                                                             :limit             20}))
+                                                                                             :first             20}))
                                                             (map :resource)
                                                             (filter #(eacl/can? client (seed/->user "user-1") :view %))
                                                             vec))
@@ -156,7 +293,7 @@
                                                                                              :subject/id        "account-0001"
                                                                                              :resource/type     :server
                                                                                              :resource/relation :account
-                                                                                             :limit             20}))
+                                                                                             :first             20}))
                                                             (map :resource)
                                                             vec))
             panel          (explorer/resource-panel-data db client
